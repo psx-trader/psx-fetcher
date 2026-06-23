@@ -1,3 +1,7 @@
 psxdata
 pypsx
 requests
+pandas
+numpy
+feedparser
+textblob
