@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-PSX Live Data Fetcher - Parallel Fetching (Corrected)
-Uses psxdata and pypsx correctly from official documentation
+PSX Live Data Fetcher - Fixed Data Extraction
 """
 
 import requests
 from datetime import datetime
 import os
 import concurrent.futures
+import pandas as pd
 
 # ===== CONFIGURATION =====
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
@@ -17,20 +17,34 @@ TO_EMAIL = os.environ.get('TO_EMAIL')
 
 SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 
+def extract_scalar(value):
+    """Convert pandas Series/DataFrame to scalar value"""
+    if value is None:
+        return 'N/A'
+    if isinstance(value, (pd.Series, pd.DataFrame)):
+        if len(value) > 0:
+            return value.iloc[0]
+        else:
+            return 'N/A'
+    return value
+
 def fetch_from_psxdata(symbol):
-    """Fetch live quote using psxdata library (correct way from docs)"""
+    """Fetch live quote using psxdata library"""
     try:
         import psxdata
-        # ✅ Correct: psxdata.quote() is a function
         quote = psxdata.quote(symbol)
         
-        # quote returns a pandas Series
         if quote is not None and not quote.empty:
+            # Extract scalar values
+            price = extract_scalar(quote.get('price'))
+            change = extract_scalar(quote.get('change'))
+            volume = extract_scalar(quote.get('volume'))
+            
             return {
                 "symbol": symbol,
-                "price": quote.get('price', 'N/A'),
-                "change": quote.get('change', 'N/A'),
-                "volume": quote.get('volume', 'N/A'),
+                "price": price,
+                "change": change,
+                "volume": volume,
                 "source": "psxdata",
                 "error": None
             }
@@ -40,24 +54,32 @@ def fetch_from_psxdata(symbol):
         return {"symbol": symbol, "error": str(e), "source": "psxdata"}
 
 def fetch_from_pypsx(symbol):
-    """Fetch data using pypsx library (correct way from docs)"""
+    """Fetch data using pypsx library"""
     try:
         import pypsx
-        # ✅ Correct: Use PSXTicker class
         ticker = pypsx.PSXTicker(symbol)
-        
-        # Get snapshot data (OHLCV, bid/ask, etc.)
         snapshot = ticker.snapshot
-        
-        # Get REG tab data (OHLCV, ranges, ratios)
         reg_data = snapshot.get('REG', {})
         
         if reg_data:
+            # Extract scalar values
+            price = reg_data.get('Current', reg_data.get('Close', 'N/A'))
+            change = reg_data.get('Change %', reg_data.get('Change', 'N/A'))
+            volume = reg_data.get('Volume', 'N/A')
+            
+            # Convert to scalar if needed
+            if isinstance(price, (pd.Series, pd.DataFrame)):
+                price = price.iloc[0] if len(price) > 0 else 'N/A'
+            if isinstance(change, (pd.Series, pd.DataFrame)):
+                change = change.iloc[0] if len(change) > 0 else 'N/A'
+            if isinstance(volume, (pd.Series, pd.DataFrame)):
+                volume = volume.iloc[0] if len(volume) > 0 else 'N/A'
+            
             return {
                 "symbol": symbol,
-                "price": reg_data.get('Current', reg_data.get('Close', 'N/A')),
-                "change": reg_data.get('Change %', reg_data.get('Change', 'N/A')),
-                "volume": reg_data.get('Volume', 'N/A'),
+                "price": price,
+                "change": change,
+                "volume": volume,
                 "source": "pypsx",
                 "error": None
             }
@@ -69,7 +91,7 @@ def fetch_from_pypsx(symbol):
 def fetch_from_alpha_vantage(symbol):
     """Fallback: Fetch data from Alpha Vantage API"""
     try:
-        API_KEY = "YOUR_ALPHA_VANTAGE_API_KEY"  # Get from alphavantage.co
+        API_KEY = "YOUR_ALPHA_VANTAGE_API_KEY"  # Replace with your key
         url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}.KAR&apikey={API_KEY}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
@@ -85,7 +107,7 @@ def fetch_from_alpha_vantage(symbol):
                     "error": None
                 }
             else:
-                return {"symbol": symbol, "error": "No data from Alpha Vantage", "source": "alphavantage"}
+                return {"symbol": symbol, "error": "No data", "source": "alphavantage"}
         else:
             return {"symbol": symbol, "error": f"HTTP {response.status_code}", "source": "alphavantage"}
     except Exception as e:
@@ -128,7 +150,7 @@ def format_report(data):
     current_date = datetime.now().strftime("%B %d, %Y")
     current_time = datetime.now().strftime("%H:%M:%S")
     
-    output = f"""🚀 **PSX LIVE DATA REPORT** (Fixed Libraries)
+    output = f"""🚀 **PSX LIVE DATA REPORT** (Fixed Extraction)
 📅 Date: {current_date}
 ⏰ Time: {current_time} PKT
 💰 Portfolio: PKR 30,000
@@ -179,7 +201,7 @@ def send_via_resend(subject, body):
 
 def main():
     print(f"🚀 Starting PSX data fetch at {datetime.now()}")
-    print(f"📚 Using fixed libraries: psxdata + pypsx (from official docs)")
+    print(f"📚 Using fixed libraries with scalar extraction")
     
     if not RESEND_API_KEY:
         print("❌ ERROR: RESEND_API_KEY not set")
