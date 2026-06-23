@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-PSX Live Data Fetcher - Parallel Fetching with Fixed Libraries
+PSX Live Data Fetcher - Parallel Fetching (Corrected)
+Uses psxdata correctly (direct function calls)
 """
 
 import requests
@@ -17,35 +18,29 @@ TO_EMAIL = os.environ.get('TO_EMAIL')
 SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 
 def fetch_from_psxdata(symbol):
-    """Try psxdata library with multiple class name attempts"""
+    """Fetch live quote using psxdata library (correct way)"""
     try:
         import psxdata
-        # Try different class names
-        psx = None
-        for class_name in ['PSXData', 'PSX', 'PakistanStockExchange']:
-            try:
-                psx = getattr(psxdata, class_name)()
-                break
-            except:
-                continue
+        # ✅ Correct: psxdata.quote() is a function, not a class
+        quote = psxdata.quote(symbol)
         
-        if psx is None:
-            return {"symbol": symbol, "error": "No class found", "source": "psxdata"}
-        
-        quote = psx.get_quote(symbol)
-        return {
-            "symbol": symbol,
-            "price": quote.price,
-            "change": quote.change,
-            "volume": quote.volume,
-            "source": "psxdata",
-            "error": None
-        }
+        # quote returns a pandas Series or similar
+        if quote is not None and not quote.empty:
+            return {
+                "symbol": symbol,
+                "price": quote.get('price', 'N/A'),
+                "change": quote.get('change', 'N/A'),
+                "volume": quote.get('volume', 'N/A'),
+                "source": "psxdata",
+                "error": None
+            }
+        else:
+            return {"symbol": symbol, "error": "No data returned", "source": "psxdata"}
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "source": "psxdata"}
 
 def fetch_from_pypsx(symbol):
-    """Try pypsx library with DataFrame handling"""
+    """Try pypsx library"""
     try:
         import pypsx
         try:
@@ -54,9 +49,7 @@ def fetch_from_pypsx(symbol):
         except:
             data = pypsx.get_intraday(symbol)
         
-        # Handle DataFrame correctly
         if data is not None and hasattr(data, 'empty') and not data.empty:
-            # Get the latest row (DataFrame)
             latest = data.iloc[-1]
             return {
                 "symbol": symbol,
@@ -71,30 +64,34 @@ def fetch_from_pypsx(symbol):
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "source": "pypsx"}
 
-def fetch_from_psx_mcp(symbol):
-    """Try psx-mcp server (if running)"""
+def fetch_from_alpha_vantage(symbol):
+    """Fetch data from Alpha Vantage API (free fallback)"""
     try:
-        url = "http://localhost:5000/tools/get_quote"
-        response = requests.post(url, json={"symbol": symbol}, timeout=3)
+        API_KEY = "YOUR_ALPHA_VANTAGE_API_KEY"  # Get from alphavantage.co
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}.KAR&apikey={API_KEY}"
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            return {
-                "symbol": symbol,
-                "price": data.get('price', 'N/A'),
-                "change": data.get('change', 'N/A'),
-                "volume": data.get('volume', 'N/A'),
-                "source": "psx-mcp",
-                "error": None
-            }
+            quote = data.get('Global Quote', {})
+            if quote:
+                return {
+                    "symbol": symbol,
+                    "price": quote.get('05. price', 'N/A'),
+                    "change": quote.get('10. change percent', 'N/A').replace('%', ''),
+                    "volume": quote.get('06. volume', 'N/A'),
+                    "source": "alphavantage",
+                    "error": None
+                }
+            else:
+                return {"symbol": symbol, "error": "No data from Alpha Vantage", "source": "alphavantage"}
         else:
-            return {"symbol": symbol, "error": f"HTTP {response.status_code}", "source": "psx-mcp"}
+            return {"symbol": symbol, "error": f"HTTP {response.status_code}", "source": "alphavantage"}
     except Exception as e:
-        # Silently fail for psx-mcp if not running
-        return {"symbol": symbol, "error": "Server not available", "source": "psx-mcp"}
+        return {"symbol": symbol, "error": str(e), "source": "alphavantage"}
 
 def fetch_psx_data_parallel(symbol):
     """Fetch from all sources in parallel"""
-    sources = [fetch_from_psxdata, fetch_from_pypsx, fetch_from_psx_mcp]
+    sources = [fetch_from_psxdata, fetch_from_pypsx, fetch_from_alpha_vantage]
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         future_to_source = {
@@ -102,14 +99,12 @@ def fetch_psx_data_parallel(symbol):
             for source in sources
         }
         
-        # First successful response wins
         for future in concurrent.futures.as_completed(future_to_source):
             result = future.result()
             if result and not result.get("error"):
                 print(f"✅ Got data from {result.get('source')}")
                 return result
         
-        # If all failed, return the first error
         for future in concurrent.futures.as_completed(future_to_source):
             result = future.result()
             if result:
@@ -131,7 +126,7 @@ def format_report(data):
     current_date = datetime.now().strftime("%B %d, %Y")
     current_time = datetime.now().strftime("%H:%M:%S")
     
-    output = f"""🚀 **PSX LIVE DATA REPORT** (Parallel Fetching)
+    output = f"""🚀 **PSX LIVE DATA REPORT** (Parallel Fetching - Fixed)
 📅 Date: {current_date}
 ⏰ Time: {current_time} PKT
 💰 Portfolio: PKR 30,000
@@ -182,9 +177,8 @@ def send_via_resend(subject, body):
 
 def main():
     print(f"🚀 Starting PSX data fetch at {datetime.now()}")
-    print(f"📚 Using parallel fetching with fixed libraries")
+    print(f"📚 Using parallel fetching with fixed psxdata")
     
-    # Check environment variables
     if not RESEND_API_KEY:
         print("❌ ERROR: RESEND_API_KEY not set")
         return
