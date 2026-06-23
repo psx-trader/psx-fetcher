@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PSX Live Data Fetcher - Parallel Fetching (Corrected)
-Uses psxdata correctly (direct function calls)
+Uses psxdata and pypsx correctly from official documentation
 """
 
 import requests
@@ -18,13 +18,13 @@ TO_EMAIL = os.environ.get('TO_EMAIL')
 SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 
 def fetch_from_psxdata(symbol):
-    """Fetch live quote using psxdata library (correct way)"""
+    """Fetch live quote using psxdata library (correct way from docs)"""
     try:
         import psxdata
-        # ✅ Correct: psxdata.quote() is a function, not a class
+        # ✅ Correct: psxdata.quote() is a function
         quote = psxdata.quote(symbol)
         
-        # quote returns a pandas Series or similar
+        # quote returns a pandas Series
         if quote is not None and not quote.empty:
             return {
                 "symbol": symbol,
@@ -40,32 +40,34 @@ def fetch_from_psxdata(symbol):
         return {"symbol": symbol, "error": str(e), "source": "psxdata"}
 
 def fetch_from_pypsx(symbol):
-    """Try pypsx library"""
+    """Fetch data using pypsx library (correct way from docs)"""
     try:
         import pypsx
-        try:
-            from pypsx import get_intraday
-            data = get_intraday(symbol)
-        except:
-            data = pypsx.get_intraday(symbol)
+        # ✅ Correct: Use PSXTicker class
+        ticker = pypsx.PSXTicker(symbol)
         
-        if data is not None and hasattr(data, 'empty') and not data.empty:
-            latest = data.iloc[-1]
+        # Get snapshot data (OHLCV, bid/ask, etc.)
+        snapshot = ticker.snapshot
+        
+        # Get REG tab data (OHLCV, ranges, ratios)
+        reg_data = snapshot.get('REG', {})
+        
+        if reg_data:
             return {
                 "symbol": symbol,
-                "price": latest.get('close', 'N/A'),
-                "change": latest.get('change', 'N/A'),
-                "volume": latest.get('volume', 'N/A'),
+                "price": reg_data.get('Current', reg_data.get('Close', 'N/A')),
+                "change": reg_data.get('Change %', reg_data.get('Change', 'N/A')),
+                "volume": reg_data.get('Volume', 'N/A'),
                 "source": "pypsx",
                 "error": None
             }
         else:
-            return {"symbol": symbol, "error": "No data", "source": "pypsx"}
+            return {"symbol": symbol, "error": "No data from pypsx", "source": "pypsx"}
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "source": "pypsx"}
 
 def fetch_from_alpha_vantage(symbol):
-    """Fetch data from Alpha Vantage API (free fallback)"""
+    """Fallback: Fetch data from Alpha Vantage API"""
     try:
         API_KEY = "YOUR_ALPHA_VANTAGE_API_KEY"  # Get from alphavantage.co
         url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}.KAR&apikey={API_KEY}"
@@ -126,7 +128,7 @@ def format_report(data):
     current_date = datetime.now().strftime("%B %d, %Y")
     current_time = datetime.now().strftime("%H:%M:%S")
     
-    output = f"""🚀 **PSX LIVE DATA REPORT** (Parallel Fetching - Fixed)
+    output = f"""🚀 **PSX LIVE DATA REPORT** (Fixed Libraries)
 📅 Date: {current_date}
 ⏰ Time: {current_time} PKT
 💰 Portfolio: PKR 30,000
@@ -177,7 +179,7 @@ def send_via_resend(subject, body):
 
 def main():
     print(f"🚀 Starting PSX data fetch at {datetime.now()}")
-    print(f"📚 Using parallel fetching with fixed psxdata")
+    print(f"📚 Using fixed libraries: psxdata + pypsx (from official docs)")
     
     if not RESEND_API_KEY:
         print("❌ ERROR: RESEND_API_KEY not set")
