@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PSX Market Intelligence Report - Enhanced Edition (Fixed)
+PSX Market Intelligence Report - Working Version
 Fetches stock data, market pulse, index summary, and fundamentals.
 Uses pypsx and psxdata libraries.
 """
@@ -22,40 +22,6 @@ STOCK_SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 # ------------------------------------------------------------
 # 1. Data Fetching Functions
 # ------------------------------------------------------------
-
-def fetch_market_pulse():
-    """Fetch top gainers, losers, and most active stocks."""
-    try:
-        import pypsx
-        performers = pypsx.top_performers()
-        return {
-            "gainers": performers.get("top_gainers", pd.DataFrame()),
-            "losers": performers.get("top_decliners", pd.DataFrame()),
-            "active": performers.get("top_actives", pd.DataFrame())
-        }
-    except Exception as e:
-        print(f"Error fetching market pulse: {e}")
-        return {"gainers": None, "losers": None, "active": None}
-
-def fetch_index_summary():
-    """Fetch current values for major indices."""
-    try:
-        import pypsx
-        indices = pypsx.get_indices()
-        return indices
-    except Exception as e:
-        print(f"Error fetching indices: {e}")
-        return None
-
-def fetch_sector_performance():
-    """Fetch sector summary."""
-    try:
-        import pypsx
-        sectors = pypsx.sector_summary()
-        return sectors
-    except Exception as e:
-        print(f"Error fetching sector data: {e}")
-        return None
 
 def fetch_stock_quote(symbol):
     """Fetch real-time quote for a stock."""
@@ -108,6 +74,40 @@ def fetch_historical_data(symbol, days=90):
         return df
     except Exception as e:
         print(f"Error fetching historical data for {symbol}: {e}")
+        return None
+
+def fetch_market_pulse():
+    """Fetch top gainers, losers, and most active stocks."""
+    try:
+        import pypsx
+        performers = pypsx.top_performers()
+        return {
+            "gainers": performers.get("top_gainers", pd.DataFrame()),
+            "losers": performers.get("top_decliners", pd.DataFrame()),
+            "active": performers.get("top_actives", pd.DataFrame())
+        }
+    except Exception as e:
+        print(f"Error fetching market pulse: {e}")
+        return {"gainers": None, "losers": None, "active": None}
+
+def fetch_index_summary():
+    """Fetch current values for major indices."""
+    try:
+        import pypsx
+        indices = pypsx.get_indices()
+        return indices
+    except Exception as e:
+        print(f"Error fetching indices: {e}")
+        return None
+
+def fetch_sector_performance():
+    """Fetch sector summary."""
+    try:
+        import pypsx
+        sectors = pypsx.sector_summary()
+        return sectors
+    except Exception as e:
+        print(f"Error fetching sector data: {e}")
         return None
 
 # ------------------------------------------------------------
@@ -178,11 +178,9 @@ def calculate_indicators(df):
         signal = macd.ewm(span=9, adjust=False).mean()
         indicators['macd'] = macd.iloc[-1] if len(macd) > 0 else None
         indicators['macd_signal'] = signal.iloc[-1] if len(signal) > 0 else None
-        indicators['macd_histogram'] = (macd - signal).iloc[-1] if len(macd) > 0 and len(signal) > 0 else None
     except:
         indicators['macd'] = None
         indicators['macd_signal'] = None
-        indicators['macd_histogram'] = None
     
     # Bollinger Bands
     try:
@@ -222,14 +220,6 @@ def calculate_indicators(df):
     except:
         indicators['volume_sma'] = None
         indicators['volume_ratio'] = None
-    
-    # Support/Resistance
-    try:
-        indicators['resistance'] = close.tail(20).max() if len(close) >= 20 else None
-        indicators['support'] = close.tail(20).min() if len(close) >= 20 else None
-    except:
-        indicators['resistance'] = None
-        indicators['support'] = None
     
     return indicators
 
@@ -344,18 +334,6 @@ def generate_signals(symbol, price, indicators):
                 "priority": "HIGH"
             })
     
-    # Volume
-    vol_ratio = indicators.get('volume_ratio')
-    if vol_ratio is not None and vol_ratio > 1.5:
-        signals.append({
-            "signal": "📊 HIGH VOLUME",
-            "indicator": "Volume",
-            "value": f"{vol_ratio:.2f}x average",
-            "reason": "Volume 50% above average — strong interest",
-            "timing": "Watch for breakout direction",
-            "priority": "MEDIUM"
-        })
-    
     return signals
 
 def calculate_entry_exit(symbol, price, signals):
@@ -410,6 +388,13 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
     """Generate comprehensive HTML report."""
     now = datetime.now().strftime("%B %d, %Y at %H:%M:%S PKT")
     
+    # Convert DataFrames to HTML
+    index_html = df_to_html(index_summary, 10)
+    gainers_html = df_to_html(market_pulse.get('gainers'), 5)
+    losers_html = df_to_html(market_pulse.get('losers'), 5)
+    active_html = df_to_html(market_pulse.get('active'), 5)
+    sectors_html = df_to_html(sector_data, 10)
+    
     html = f"""
     <html>
     <head>
@@ -436,43 +421,31 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             <h1>🚀 PSX Market Intelligence Report</h1>
             <p>Generated on {now}</p>
         </div>
-    """
-    
-    # Index Summary
-    html += """
+
+        <!-- Index Summary -->
         <div class="section">
             <h2>📊 Index Summary</h2>
-            {df_to_html(index_summary, 10)}
+            {index_html}
         </div>
-    """.format(df_to_html=df_to_html, index_summary=index_summary)
-    
-    # Market Pulse
-    html += """
+
+        <!-- Market Pulse -->
         <div class="section">
             <h2>📈 Market Pulse</h2>
             <h3>Top Gainers</h3>
-            {gainers}
+            {gainers_html}
             <h3>Top Losers</h3>
-            {losers}
+            {losers_html}
             <h3>Most Active</h3>
-            {active}
+            {active_html}
         </div>
-    """.format(
-        gainers=df_to_html(market_pulse.get('gainers'), 5),
-        losers=df_to_html(market_pulse.get('losers'), 5),
-        active=df_to_html(market_pulse.get('active'), 5)
-    )
-    
-    # Sector Performance
-    html += """
+
+        <!-- Sector Performance -->
         <div class="section">
             <h2>🏭 Sector Performance</h2>
-            {sectors}
+            {sectors_html}
         </div>
-    """.format(sectors=df_to_html(sector_data, 10))
-    
-    # Portfolio Watchlist
-    html += """
+
+        <!-- Portfolio Watchlist -->
         <div class="section">
             <h2>💼 Your Portfolio Watchlist</h2>
             <table>
@@ -495,7 +468,6 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
     for symbol in STOCK_SYMBOLS:
         q = quotes.get(symbol, {})
         f = fundamentals.get(symbol, {})
-        ind = indicators.get(symbol, {})
         sig = signals.get(symbol, [])
         price = q.get('price', 'N/A')
         
@@ -538,7 +510,7 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
     for symbol in STOCK_SYMBOLS:
         sigs = signals.get(symbol, [])
         ee = entry_exit.get(symbol, {})
-        if sigs:
+        if sigs and not (len(sigs) == 1 and 'Insufficient data' in sigs[0].get('signal', '')):
             html += f"<h3>{symbol}</h3>"
             html += "<table><thead><tr><th>Signal</th><th>Indicator</th><th>Value</th><th>Reason</th><th>Timing</th></tr></thead><tbody>"
             for s in sigs[:5]:
@@ -559,6 +531,10 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
                     <strong>Entry:</strong> PKR {ee.get('entry_price', 'N/A')} | 
                     <strong>Target:</strong> PKR {ee.get('target_price', 'N/A')} | 
                     <strong>Stop Loss:</strong> PKR {ee.get('stop_loss', 'N/A')}
+                </p>
+                <p style="font-size: 12px; color: #666;">
+                    <strong>Entry Timing:</strong> {ee.get('entry_timing', 'N/A')}<br>
+                    <strong>Exit Timing:</strong> {ee.get('exit_timing', 'N/A')}
                 </p>
             """
     
