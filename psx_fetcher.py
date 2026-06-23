@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-PSX Live Data Fetcher - Parallel Fetching
-Fetches live PSX data from multiple sources simultaneously
+PSX Live Data Fetcher - Parallel Fetching with Fixed Libraries
 """
 
 import requests
@@ -9,20 +8,30 @@ from datetime import datetime
 import os
 import concurrent.futures
 
-# ===== CONFIGURATION (Read from Render Environment Variables) =====
+# ===== CONFIGURATION =====
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 FROM_EMAIL = os.environ.get('FROM_EMAIL')
 TO_EMAIL = os.environ.get('TO_EMAIL')
-# ================================================================
+# =========================
 
-# Stock symbols to track
 SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 
 def fetch_from_psxdata(symbol):
-    """Try psxdata library"""
+    """Try psxdata library with multiple class name attempts"""
     try:
         import psxdata
-        psx = psxdata.PSXData()
+        # Try different class names
+        psx = None
+        for class_name in ['PSXData', 'PSX', 'PakistanStockExchange']:
+            try:
+                psx = getattr(psxdata, class_name)()
+                break
+            except:
+                continue
+        
+        if psx is None:
+            return {"symbol": symbol, "error": "No class found", "source": "psxdata"}
+        
         quote = psx.get_quote(symbol)
         return {
             "symbol": symbol,
@@ -36,7 +45,7 @@ def fetch_from_psxdata(symbol):
         return {"symbol": symbol, "error": str(e), "source": "psxdata"}
 
 def fetch_from_pypsx(symbol):
-    """Try pypsx library"""
+    """Try pypsx library with DataFrame handling"""
     try:
         import pypsx
         try:
@@ -45,8 +54,10 @@ def fetch_from_pypsx(symbol):
         except:
             data = pypsx.get_intraday(symbol)
         
-        if data and len(data) > 0:
-            latest = data[-1]
+        # Handle DataFrame correctly
+        if data is not None and hasattr(data, 'empty') and not data.empty:
+            # Get the latest row (DataFrame)
+            latest = data.iloc[-1]
             return {
                 "symbol": symbol,
                 "price": latest.get('close', 'N/A'),
@@ -61,10 +72,10 @@ def fetch_from_pypsx(symbol):
         return {"symbol": symbol, "error": str(e), "source": "pypsx"}
 
 def fetch_from_psx_mcp(symbol):
-    """Try psx-mcp server"""
+    """Try psx-mcp server (if running)"""
     try:
         url = "http://localhost:5000/tools/get_quote"
-        response = requests.post(url, json={"symbol": symbol}, timeout=5)
+        response = requests.post(url, json={"symbol": symbol}, timeout=3)
         if response.status_code == 200:
             data = response.json()
             return {
@@ -78,26 +89,22 @@ def fetch_from_psx_mcp(symbol):
         else:
             return {"symbol": symbol, "error": f"HTTP {response.status_code}", "source": "psx-mcp"}
     except Exception as e:
-        return {"symbol": symbol, "error": str(e), "source": "psx-mcp"}
+        # Silently fail for psx-mcp if not running
+        return {"symbol": symbol, "error": "Server not available", "source": "psx-mcp"}
 
 def fetch_psx_data_parallel(symbol):
-    """
-    Fetch data from all sources simultaneously.
-    The first successful response wins.
-    """
+    """Fetch from all sources in parallel"""
     sources = [fetch_from_psxdata, fetch_from_pypsx, fetch_from_psx_mcp]
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        # Submit all tasks at once (parallel)
         future_to_source = {
             executor.submit(source, symbol): source.__name__ 
             for source in sources
         }
         
-        # Check results as they complete
+        # First successful response wins
         for future in concurrent.futures.as_completed(future_to_source):
             result = future.result()
-            # If we get valid data (no error), return it immediately
             if result and not result.get("error"):
                 print(f"✅ Got data from {result.get('source')}")
                 return result
@@ -109,19 +116,18 @@ def fetch_psx_data_parallel(symbol):
                 return result
 
 def fetch_all_symbols():
-    """Fetch data for all symbols using parallel fetching"""
+    """Fetch all symbols in parallel"""
     results = []
     for symbol in SYMBOLS:
         print(f"📡 Fetching {symbol} in parallel...")
         result = fetch_psx_data_parallel(symbol)
-        # Ensure timestamp is added
         if result and not result.get("error"):
             result["timestamp"] = datetime.now().strftime("%H:%M:%S")
         results.append(result)
     return results
 
 def format_report(data):
-    """Format data into a readable report"""
+    """Format data into readable report"""
     current_date = datetime.now().strftime("%B %d, %Y")
     current_time = datetime.now().strftime("%H:%M:%S")
     
@@ -147,32 +153,28 @@ def format_report(data):
     output += f"{'='*60}\n"
     output += f"⏱️ Report generated at: {current_time} PKT\n"
     output += f"🕌 Verify Shariah compliance on PSX-KMI index\n"
-    
     return output
 
 def send_via_resend(subject, body):
     """Send email using Resend API"""
     url = "https://api.resend.com/emails"
-    
     headers = {
         "Authorization": f"Bearer {RESEND_API_KEY}",
         "Content-Type": "application/json"
     }
-    
     data = {
         "from": FROM_EMAIL,
         "to": [TO_EMAIL],
         "subject": subject,
         "text": body
     }
-    
     try:
         response = requests.post(url, headers=headers, json=data, timeout=30)
         if response.status_code == 200:
             print(f"✅ Email sent successfully to {TO_EMAIL}")
             return True
         else:
-            print(f"❌ Resend API error: {response.status_code} - {response.text}")
+            print(f"❌ Resend API error: {response.status_code}")
             return False
     except Exception as e:
         print(f"❌ Email send failed: {e}")
@@ -180,7 +182,7 @@ def send_via_resend(subject, body):
 
 def main():
     print(f"🚀 Starting PSX data fetch at {datetime.now()}")
-    print(f"📚 Using parallel fetching: psxdata + pypsx + psx-mcp")
+    print(f"📚 Using parallel fetching with fixed libraries")
     
     # Check environment variables
     if not RESEND_API_KEY:
@@ -193,21 +195,14 @@ def main():
         print("❌ ERROR: TO_EMAIL not set")
         return
     
-    # Fetch data in parallel
     data = fetch_all_symbols()
-    
-    # Count successful fetches
     successful = sum(1 for d in data if not d.get("error"))
     print(f"✅ Fetched data for {successful} out of {len(data)} symbols")
     
-    # Generate report
     report = format_report(data)
-    
-    # Send email
     subject = f"PSX Live Data - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     email_sent = send_via_resend(subject, report)
-    
-    print(f"✅ Data fetched. Email sent: {email_sent}")
+    print(f"✅ Email sent: {email_sent}")
 
 if __name__ == "__main__":
     main()
