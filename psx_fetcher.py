@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-PSX Live Data Fetcher - Triple Fallback (psxdata + pypsx + HTTP)
-Fetches live PSX data with multiple fallback options
+PSX Live Data Fetcher - Parallel Fetching
+Fetches live PSX data from multiple sources simultaneously
 """
 
 import requests
 from datetime import datetime
 import os
+import concurrent.futures
 
 # ===== CONFIGURATION (Read from Render Environment Variables) =====
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
@@ -14,10 +15,10 @@ FROM_EMAIL = os.environ.get('FROM_EMAIL')
 TO_EMAIL = os.environ.get('TO_EMAIL')
 # ================================================================
 
-# Stock symbols to track (Shariah-compliant PSX stocks)
+# Stock symbols to track
 SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 
-def fetch_quote_psxdata(symbol):
+def fetch_from_psxdata(symbol):
     """Try psxdata library"""
     try:
         import psxdata
@@ -28,30 +29,21 @@ def fetch_quote_psxdata(symbol):
             "price": quote.price,
             "change": quote.change,
             "volume": quote.volume,
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "error": None,
-            "source": "psxdata"
+            "source": "psxdata",
+            "error": None
         }
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "source": "psxdata"}
 
-def fetch_quote_pypsx(symbol):
-    """Try pypsx library with corrected API"""
+def fetch_from_pypsx(symbol):
+    """Try pypsx library"""
     try:
         import pypsx
-        # Try multiple possible API patterns
         try:
             from pypsx import get_intraday
             data = get_intraday(symbol)
         except:
-            try:
-                data = pypsx.get_intraday(symbol)
-            except:
-                try:
-                    psx = pypsx.PakistanStockExchange()
-                    data = psx.get_intraday(symbol)
-                except:
-                    return fetch_quote_http(symbol)
+            data = pypsx.get_intraday(symbol)
         
         if data and len(data) > 0:
             latest = data[-1]
@@ -60,58 +52,72 @@ def fetch_quote_pypsx(symbol):
                 "price": latest.get('close', 'N/A'),
                 "change": latest.get('change', 'N/A'),
                 "volume": latest.get('volume', 'N/A'),
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "error": None,
-                "source": "pypsx"
+                "source": "pypsx",
+                "error": None
             }
         else:
             return {"symbol": symbol, "error": "No data", "source": "pypsx"}
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "source": "pypsx"}
 
-def fetch_quote_http(symbol):
-    """Fallback: Direct HTTP request"""
+def fetch_from_psx_mcp(symbol):
+    """Try psx-mcp server"""
     try:
-        import requests
-        url = f"https://psxterminal.com/api/ticks/REG/{symbol}"
-        response = requests.get(url, timeout=10)
+        url = "http://localhost:5000/tools/get_quote"
+        response = requests.post(url, json={"symbol": symbol}, timeout=5)
         if response.status_code == 200:
             data = response.json()
             return {
                 "symbol": symbol,
-                "price": data.get('lastPrice', 'N/A'),
-                "change": data.get('changePercent', 'N/A'),
+                "price": data.get('price', 'N/A'),
+                "change": data.get('change', 'N/A'),
                 "volume": data.get('volume', 'N/A'),
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "error": None,
-                "source": "http"
+                "source": "psx-mcp",
+                "error": None
             }
         else:
-            return {"symbol": symbol, "error": f"HTTP {response.status_code}", "source": "http"}
+            return {"symbol": symbol, "error": f"HTTP {response.status_code}", "source": "psx-mcp"}
     except Exception as e:
-        return {"symbol": symbol, "error": str(e), "source": "http"}
+        return {"symbol": symbol, "error": str(e), "source": "psx-mcp"}
 
-def fetch_psx_data():
-    """Triple fallback: psxdata → pypsx → HTTP"""
+def fetch_psx_data_parallel(symbol):
+    """
+    Fetch data from all sources simultaneously.
+    The first successful response wins.
+    """
+    sources = [fetch_from_psxdata, fetch_from_pypsx, fetch_from_psx_mcp]
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # Submit all tasks at once (parallel)
+        future_to_source = {
+            executor.submit(source, symbol): source.__name__ 
+            for source in sources
+        }
+        
+        # Check results as they complete
+        for future in concurrent.futures.as_completed(future_to_source):
+            result = future.result()
+            # If we get valid data (no error), return it immediately
+            if result and not result.get("error"):
+                print(f"✅ Got data from {result.get('source')}")
+                return result
+        
+        # If all failed, return the first error
+        for future in concurrent.futures.as_completed(future_to_source):
+            result = future.result()
+            if result:
+                return result
+
+def fetch_all_symbols():
+    """Fetch data for all symbols using parallel fetching"""
     results = []
     for symbol in SYMBOLS:
-        print(f"Fetching {symbol}...")
-        
-        # Try psxdata first
-        result = fetch_quote_psxdata(symbol)
-        
-        # If psxdata failed, try pypsx
-        if result.get("error"):
-            print(f"psxdata failed for {symbol}, trying pypsx...")
-            result = fetch_quote_pypsx(symbol)
-        
-        # If pypsx failed, try HTTP
-        if result.get("error"):
-            print(f"pypsx failed for {symbol}, trying HTTP...")
-            result = fetch_quote_http(symbol)
-        
+        print(f"📡 Fetching {symbol} in parallel...")
+        result = fetch_psx_data_parallel(symbol)
+        # Ensure timestamp is added
+        if result and not result.get("error"):
+            result["timestamp"] = datetime.now().strftime("%H:%M:%S")
         results.append(result)
-    
     return results
 
 def format_report(data):
@@ -119,7 +125,7 @@ def format_report(data):
     current_date = datetime.now().strftime("%B %d, %Y")
     current_time = datetime.now().strftime("%H:%M:%S")
     
-    output = f"""🚀 **PSX LIVE DATA REPORT** (Triple Fallback)
+    output = f"""🚀 **PSX LIVE DATA REPORT** (Parallel Fetching)
 📅 Date: {current_date}
 ⏰ Time: {current_time} PKT
 💰 Portfolio: PKR 30,000
@@ -174,23 +180,23 @@ def send_via_resend(subject, body):
 
 def main():
     print(f"🚀 Starting PSX data fetch at {datetime.now()}")
-    print(f"📚 Using triple fallback: psxdata + pypsx + HTTP")
+    print(f"📚 Using parallel fetching: psxdata + pypsx + psx-mcp")
     
-    # Check if environment variables are set
+    # Check environment variables
     if not RESEND_API_KEY:
-        print("❌ ERROR: RESEND_API_KEY not set in environment variables")
+        print("❌ ERROR: RESEND_API_KEY not set")
         return
     if not FROM_EMAIL:
-        print("❌ ERROR: FROM_EMAIL not set in environment variables")
+        print("❌ ERROR: FROM_EMAIL not set")
         return
     if not TO_EMAIL:
-        print("❌ ERROR: TO_EMAIL not set in environment variables")
+        print("❌ ERROR: TO_EMAIL not set")
         return
     
-    # Fetch data with triple fallback
-    data = fetch_psx_data()
+    # Fetch data in parallel
+    data = fetch_all_symbols()
     
-    # Print summary
+    # Count successful fetches
     successful = sum(1 for d in data if not d.get("error"))
     print(f"✅ Fetched data for {successful} out of {len(data)} symbols")
     
