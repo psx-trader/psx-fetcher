@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PSX Market Intelligence Report - Enhanced Edition
+PSX Market Intelligence Report - Enhanced Edition (Fixed)
 Fetches stock data, market pulse (gainers/losers), index summary, and fundamentals.
 """
 
@@ -113,18 +113,30 @@ def fetch_stock_quotes(symbols):
 # 2. HTML Report Generation
 # ------------------------------------------------------------
 
+def df_to_html(df, display_columns=None, limit=5):
+    """Convert DataFrame to HTML table with intelligent column detection."""
+    if df is None or df.empty:
+        return "<p>No data available</p>"
+    
+    # If display_columns is provided, try to use them
+    if display_columns:
+        # Find which columns actually exist in the DataFrame
+        existing_cols = [col for col in display_columns if col in df.columns]
+        if existing_cols:
+            df = df[existing_cols]
+        else:
+            # If none of the requested columns exist, use all columns
+            pass
+    
+    # Limit rows
+    df = df.head(limit)
+    
+    # Convert to HTML with styling
+    return df.to_html(index=False, border=0, classes='data-table')
+
 def generate_html_report(quotes, fundamentals, market_pulse, index_summary, sector_data):
     """Generate a professional HTML email report."""
     now = datetime.now().strftime("%B %d, %Y at %H:%M:%S PKT")
-
-    # --- Helper to build HTML table from DataFrame ---
-    def df_to_html(df, columns=None, limit=5):
-        if df is None or df.empty:
-            return "<p>No data available</p>"
-        if columns:
-            df = df[columns]
-        df = df.head(limit)
-        return df.to_html(index=False, border=0, classes='data-table')
 
     html = f"""
     <html>
@@ -151,20 +163,26 @@ def generate_html_report(quotes, fundamentals, market_pulse, index_summary, sect
         <!-- Index Summary -->
         <div class="section">
             <h2>📊 Index Summary</h2>
-            {df_to_html(index_summary, ['Index', 'Current', 'Change', 'Change %'])}
+            {df_to_html(index_summary, limit=10)}
         </div>
 
         <!-- Market Pulse -->
         <div class="section">
             <h2>📈 Market Pulse</h2>
             <h3>Top Gainers (PKR)</h3>
-            {df_to_html(market_pulse['gainers'], ['Symbol', 'Current', 'Change', 'Change %'])}
+            {df_to_html(market_pulse['gainers'], limit=5)}
             
             <h3>Top Losers (PKR)</h3>
-            {df_to_html(market_pulse['losers'], ['Symbol', 'Current', 'Change', 'Change %'])}
+            {df_to_html(market_pulse['losers'], limit=5)}
             
             <h3>Most Active (by Volume)</h3>
-            {df_to_html(market_pulse['active'], ['Symbol', 'Current', 'Change %', 'Volume'])}
+            {df_to_html(market_pulse['active'], limit=5)}
+        </div>
+
+        <!-- Sector Performance -->
+        <div class="section">
+            <h2>🏭 Sector Performance</h2>
+            {df_to_html(sector_data, limit=10)}
         </div>
 
         <!-- Portfolio Watchlist -->
@@ -189,7 +207,9 @@ def generate_html_report(quotes, fundamentals, market_pulse, index_summary, sect
         q = quotes.get(symbol, {})
         f = fundamentals.get(symbol, {})
         change_pct = q.get('change_pct', 'N/A')
-        change_class = 'positive' if isinstance(change_pct, (int, float)) and change_pct > 0 else 'negative' if isinstance(change_pct, (int, float)) and change_pct < 0 else ''
+        change_class = ''
+        if isinstance(change_pct, (int, float)):
+            change_class = 'positive' if change_pct > 0 else 'negative' if change_pct < 0 else ''
         html += f"""
                     <tr>
                         <td><strong>{symbol}</strong></td>
@@ -232,7 +252,7 @@ def send_html_email(subject, html_body):
         "from": FROM_EMAIL,
         "to": [TO_EMAIL],
         "subject": subject,
-        "html": html_body  # Use 'html' instead of 'text' for HTML emails
+        "html": html_body
     }
     try:
         response = requests.post(url, headers=headers, json=data, timeout=30)
