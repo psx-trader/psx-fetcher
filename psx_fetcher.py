@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PSX Live Data Fetcher - Uses Resend API for email
-Fetches live PSX data using psx-terminal and emails via Resend
+PSX Live Data Fetcher - Dual Library (psxdata + pypsx)
+Fetches live PSX data with fallback for reliability
 """
 
 import requests
@@ -17,31 +17,63 @@ TO_EMAIL = os.environ.get('TO_EMAIL')
 # Stock symbols to track (Shariah-compliant PSX stocks)
 SYMBOLS = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB"]
 
-def fetch_psx_data():
-    """Fetch live PSX data using psx-terminal library"""
+def fetch_quote_psxdata(symbol):
+    """Try to fetch data using psxdata library"""
     try:
-        from psx_terminal.feed_parser import fetch_quotes
-    except ImportError:
-        return [{"error": "psx-terminal library not installed."}]
-    
+        import psxdata
+        psx = psxdata.PSXData()
+        quote = psx.get_quote(symbol)
+        return {
+            "symbol": symbol,
+            "price": quote.price,
+            "change": quote.change,
+            "volume": quote.volume,
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "error": None,
+            "source": "psxdata"
+        }
+    except Exception as e:
+        return {"symbol": symbol, "error": str(e), "source": "psxdata"}
+
+def fetch_quote_pypsx(symbol):
+    """Try to fetch data using pypsx library"""
+    try:
+        import pypsx
+        psx = pypsx.PSX()
+        data = psx.get_intraday(symbol)
+        # Extract the latest data point
+        if data and len(data) > 0:
+            latest = data[-1]
+            return {
+                "symbol": symbol,
+                "price": latest.get('close', 'N/A'),
+                "change": latest.get('change', 'N/A'),
+                "volume": latest.get('volume', 'N/A'),
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "error": None,
+                "source": "pypsx"
+            }
+        else:
+            return {"symbol": symbol, "error": "No data returned", "source": "pypsx"}
+    except Exception as e:
+        return {"symbol": symbol, "error": str(e), "source": "pypsx"}
+
+def fetch_psx_data():
+    """Fetch data using psxdata first, fallback to pypsx if needed"""
     results = []
     for symbol in SYMBOLS:
-        try:
-            quotes = fetch_quotes(symbol)
-            if quotes and len(quotes) > 0:
-                latest = quotes[-1]
-                results.append({
-                    "symbol": symbol,
-                    "price": latest.price if hasattr(latest, 'price') else "N/A",
-                    "change": latest.change if hasattr(latest, 'change') else "N/A",
-                    "volume": latest.volume if hasattr(latest, 'volume') else "N/A",
-                    "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "error": None
-                })
-            else:
-                results.append({"symbol": symbol, "error": "No data returned"})
-        except Exception as e:
-            results.append({"symbol": symbol, "error": str(e)})
+        print(f"Fetching {symbol}...")
+        
+        # Try psxdata first
+        result = fetch_quote_psxdata(symbol)
+        
+        # If psxdata failed, try pypsx
+        if result.get("error"):
+            print(f"psxdata failed for {symbol}, trying pypsx...")
+            result = fetch_quote_pypsx(symbol)
+        
+        results.append(result)
+    
     return results
 
 def format_report(data):
@@ -49,7 +81,7 @@ def format_report(data):
     current_date = datetime.now().strftime("%B %d, %Y")
     current_time = datetime.now().strftime("%H:%M:%S")
     
-    output = f"""🚀 **PSX LIVE DATA REPORT**
+    output = f"""🚀 **PSX LIVE DATA REPORT** (Dual Library)
 📅 Date: {current_date}
 ⏰ Time: {current_time} PKT
 💰 Portfolio: PKR 30,000
@@ -61,12 +93,16 @@ def format_report(data):
 """
     for stock in data:
         if stock.get("error"):
-            output += f"❌ **{stock['symbol']}**: ERROR - {stock['error']}\n\n"
+            output += f"❌ **{stock['symbol']}**: ERROR - {stock['error']} (source: {stock.get('source', 'unknown')})\n\n"
         else:
-            output += f"**{stock['symbol']}**\n"
+            output += f"**{stock['symbol']}** (source: {stock.get('source', 'unknown')})\n"
             output += f"   • Price: {stock.get('price', 'N/A')}\n"
             output += f"   • Change: {stock.get('change', 'N/A')}\n"
             output += f"   • Volume: {stock.get('volume', 'N/A')}\n\n"
+    
+    output += f"{'='*60}\n"
+    output += f"⏱️ Report generated at: {current_time} PKT\n"
+    output += f"🕌 Verify Shariah compliance on PSX-KMI index\n"
     
     return output
 
@@ -100,6 +136,7 @@ def send_via_resend(subject, body):
 
 def main():
     print(f"🚀 Starting PSX data fetch at {datetime.now()}")
+    print(f"📚 Using dual library: psxdata + pypsx")
     
     # Check if environment variables are set
     if not RESEND_API_KEY:
@@ -112,10 +149,20 @@ def main():
         print("❌ ERROR: TO_EMAIL not set in environment variables")
         return
     
+    # Fetch data with fallback
     data = fetch_psx_data()
+    
+    # Print summary
+    successful = sum(1 for d in data if not d.get("error"))
+    print(f"✅ Fetched data for {successful} out of {len(data)} symbols")
+    
+    # Generate report
     report = format_report(data)
+    
+    # Send email
     subject = f"PSX Live Data - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     email_sent = send_via_resend(subject, report)
+    
     print(f"✅ Data fetched. Email sent: {email_sent}")
 
 if __name__ == "__main__":
