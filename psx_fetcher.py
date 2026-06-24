@@ -1,3 +1,5 @@
+Here is the complete, raw Python script you can copy and paste directly into `psx_fetcher.py`. It includes the `import os` fix and is ready to run.
+
 ```python
 #!/usr/bin/env python3
 """
@@ -1447,7 +1449,6 @@ def multi_asset_kelly(returns_matrix: pd.DataFrame, max_allocation: float = 1.0)
     inv_cov = np.linalg.pinv(cov.values)
     ones = np.ones(len(mean_rets))
     kelly_weights = inv_cov @ mean_rets.values
-    # Scale so sum of positive weights = max_allocation
     pos_weights = np.maximum(kelly_weights, 0)
     total_pos = pos_weights.sum()
     if total_pos > 0:
@@ -1482,8 +1483,7 @@ def get_upcoming_dividends(symbols: List[str]) -> List[Dict]:
         for div in EX_DATES.get(sym, []):
             ex_date = datetime.strptime(div['ex_date'], "%Y-%m-%d").date()
             days = (ex_date - today).days
-            if 0 <= days <= 60:  # extended window
-                # estimate yield
+            if 0 <= days <= 60:
                 price = next((s['current_price'] for s in TOP_50_SHARIAH_STOCKS if s['symbol'] == sym), None)
                 gross_yield = (div['amount'] / price * 100) if price and price > 0 else 0
                 upcoming.append({
@@ -1494,7 +1494,7 @@ def get_upcoming_dividends(symbols: List[str]) -> List[Dict]:
                     'record_date': div.get('record_date', ''),
                     'days_until': days,
                     'gross_yield': gross_yield,
-                    'net_yield': gross_yield * 0.85  # after tax estimate
+                    'net_yield': gross_yield * 0.85
                 })
     return sorted(upcoming, key=lambda x: x['days_until'])
 
@@ -1511,12 +1511,11 @@ def generate_signal(symbol: str, price: float, div_info: Dict, indicators: Dict,
     yield_pct = (amount / price) * 100
     
     force = (yield_pct >= 6 and days <= 2) or (yield_pct >= 8 and days <= 4)
-    standard = yield_pct >= 4 and 2 <= days <= 10  # extended window
+    standard = yield_pct >= 4 and 2 <= days <= 10
     
     if not force and not standard:
         return None
     
-    # Confidence score
     conf = 0.5
     if yield_pct > 6: conf += 0.1
     if indicators.get('rsi', 50) < 30: conf += 0.1
@@ -1531,9 +1530,7 @@ def generate_signal(symbol: str, price: float, div_info: Dict, indicators: Dict,
     if conf < CONFIDENCE_THRESHOLD:
         return None
     
-    # Position sizing
     atr = indicators.get('atr', price * 0.02)
-    # dynamic stop using ATR multiplier
     stop_mult = Config().get('trading.dynamic_stop_atr_multiplier', 2.0)
     stop = price - atr * stop_mult if atr > 0 else price * (1 - STOP_LOSS_PCT)
     target1 = price * (1 + TARGET1_PCT)
@@ -1655,10 +1652,10 @@ class PaperTradingEngine:
         trade = Trade(
             symbol=symbol,
             entry_price=price,
-            exit_price=0,  # placeholder
+            exit_price=0,
             quantity=qty,
             entry_time=datetime.now(),
-            exit_time=datetime.now(),  # will be updated on sell
+            exit_time=datetime.now(),
             pnl=0,
             pnl_pct=0,
             side='BUY',
@@ -1694,7 +1691,7 @@ class PaperTradingEngine:
             entry_price=pos.avg_price,
             exit_price=price,
             quantity=qty,
-            entry_time=datetime.now(),  # simplified, ideally store actual entry time
+            entry_time=datetime.now(),
             exit_time=datetime.now(),
             pnl=pnl,
             pnl_pct=pnl_pct,
@@ -1726,7 +1723,6 @@ class PaperTradingEngine:
         pos = self.portfolio[symbol]
         activation = self.config.get('trading.trailing_stop_activation_pct', 0.02)
         trail_pct = self.config.get('trading.trailing_stop_pct', 0.015)
-        # only activate after +2% profit
         if current_price >= pos.avg_price * (1 + activation):
             new_stop = current_price * (1 - trail_pct)
             if new_stop > pos.stop_loss:
@@ -1811,7 +1807,6 @@ class BacktestEngine:
             date = i.to_pydatetime() if hasattr(i, 'to_pydatetime') else i
             price = row['Close'] if 'Close' in row else row.iloc[3]
             
-            # Check if today is an ex-date
             is_ex_date = any(abs((date - ex_date).days) < 1 for ex_date in ex_date_list)
             
             if not in_position and is_ex_date:
@@ -1822,20 +1817,15 @@ class BacktestEngine:
                     in_position = True
                     balance -= shares * entry_price
                     balance -= shares * entry_price * self.commission
-                    # Assume dividend captured
-                    # Find matching dividend amount
                     div_amount = next((d['amount'] for d in ex_dates if abs((date - datetime.strptime(d['ex_date'], "%Y-%m-%d")).days) < 1), 0)
             
             elif in_position:
-                # Hold for at least 2 days after ex-date to simulate capture
                 days_held = (date - entry_date).days
-                if days_held >= 3:  # exit after 3 days
+                if days_held >= 3:
                     exit_price = price * (1 - self.slippage)
                     gross_pnl = (exit_price - entry_price) * shares
-                    # deduct commission on exit
                     commission_exit = shares * exit_price * self.commission
                     pnl = gross_pnl - commission_exit
-                    # add dividend (net of tax)
                     dividend_net = div_amount * shares * (1 - self.tax_rate) if div_amount else 0
                     pnl += dividend_net
                     balance += shares * exit_price + dividend_net - commission_exit
@@ -1959,12 +1949,10 @@ class RiskManager:
         self.peak_balance = ACCOUNT_BALANCE
     
     def can_trade(self, current_balance: float) -> bool:
-        # daily loss limit
         max_daily = self.config.get('safety.max_daily_loss', 0.02) * self.peak_balance
         if abs(self.daily_loss) >= max_daily:
             logger.warning("Daily loss limit reached")
             return False
-        # drawdown limit
         dd = (self.peak_balance - current_balance) / self.peak_balance if self.peak_balance > 0 else 0
         if dd >= self.config.get('safety.max_portfolio_drawdown', 0.02):
             logger.warning(f"Portfolio drawdown {dd:.2%} reached limit")
@@ -1977,7 +1965,7 @@ class RiskManager:
             self.daily_loss = 0.0
             self.current_day = today
         self.daily_loss += trade_pnl
-        if self.peak_balance < ACCOUNT_BALANCE:  # update peak
+        if self.peak_balance < ACCOUNT_BALANCE:
             self.peak_balance = ACCOUNT_BALANCE
 
 # ============================================================
@@ -2000,7 +1988,6 @@ def optimize_portfolio(returns: pd.DataFrame, target_return: float = None,
             return {sym: w for sym, w in weights.items() if w > 0.001}
         except Exception as e:
             logger.debug(f"PyPortfolioOpt error: {e}")
-    # equal weight fallback
     n = len(returns.columns)
     return {col: 1/n for col in returns.columns}
 
@@ -2010,7 +1997,7 @@ def calculate_correlation_matrix(returns: pd.DataFrame) -> pd.DataFrame:
     return returns.corr()
 
 # ============================================================
-# TELEGRAM ALERTS (no change needed)
+# TELEGRAM ALERTS
 # ============================================================
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -2073,7 +2060,6 @@ def generate_chart_base64(fig):
     return f'data:image/png;base64,{img_base64}'
 
 def generate_performance_chart(paper_engine: PaperTradingEngine) -> str:
-    """Generate P&L curve chart."""
     pnl_series = []
     cum = 0
     for t in paper_engine.trades:
@@ -2174,7 +2160,6 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
     sentiment_text = sentiment_data.get('overall', 'neutral').upper()
     sentiment_color = '#00ff88' if sentiment_text == 'BULLISH' else '#ff4444' if sentiment_text == 'BEARISH' else '#ffaa00'
     
-    # Charts
     perf_chart = generate_performance_chart(paper_engine)
     sent_chart = generate_sentiment_chart(sentiment_data)
     
@@ -2260,7 +2245,6 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
 # SCENARIO & STRESS TESTING
 # ============================================================
 def run_scenario_analysis(signals, paper_engine, price_shocks=[-0.1, -0.05, 0.05, 0.1]):
-    """Simulate price changes and report portfolio impact."""
     results = {}
     for shock in price_shocks:
         simulated_pnl = 0
@@ -2274,18 +2258,16 @@ def run_scenario_analysis(signals, paper_engine, price_shocks=[-0.1, -0.05, 0.05
 # WALK-FORWARD OPTIMIZATION (SIMPLIFIED)
 # ============================================================
 def walk_forward_optimization(symbol, historical_data, ex_dates, window_days=90, step_days=30):
-    """Perform rolling walk-forward backtests to assess robustness."""
     if historical_data is None or historical_data.empty:
         return []
     results = []
     df = historical_data.sort_index()
     start_dates = pd.date_range(df.index[0], periods=len(df)//step_days, freq=f'{step_days}D')
-    for start in start_dates[:5]:  # limit to 5 windows
+    for start in start_dates[:5]:
         end = start + pd.Timedelta(days=window_days)
         window_df = df[(df.index >= start) & (df.index <= end)]
         if len(window_df) < 30:
             continue
-        # find ex-dates within window
         ex_in_window = [d for d in ex_dates if start <= pd.Timestamp(d['ex_date']) <= end]
         bt = BacktestEngine()
         res = bt.run(symbol, window_df, ex_in_window)
@@ -2293,7 +2275,7 @@ def walk_forward_optimization(symbol, historical_data, ex_dates, window_days=90,
     return results
 
 # ============================================================
-# MAIN EXECUTION (ENHANCED)
+# MAIN EXECUTION
 # ============================================================
 def main():
     parser = argparse.ArgumentParser(description='PSX Ultimate Dividend Capture Engine v21.1')
@@ -2308,7 +2290,6 @@ def main():
     print("=" * 80)
     
     config = Config(args.config)
-    # Override global settings from config
     global ACCOUNT_BALANCE, STOP_LOSS_PCT, TARGET1_PCT, TARGET2_PCT, CONFIDENCE_THRESHOLD
     ACCOUNT_BALANCE = float(os.environ.get('PSX_ACCOUNT_BALANCE', config.get('trading.initial_balance', 30000.0)))
     STOP_LOSS_PCT = config.get('trading.stop_loss_pct', 0.03)
@@ -2321,7 +2302,6 @@ def main():
         symbols = args.symbol
     
     if args.mode == 'backtest':
-        # Pure backtest mode
         print("Running backtests...")
         historical = {}
         try:
@@ -2345,26 +2325,22 @@ def main():
             print(f"{sym}: Trades={res.total_trades}, WinRate={res.win_rate:.2%}, Total P&L={res.total_pnl:+.2f}, Sharpe={res.sharpe_ratio:.2f}, MaxDD={res.max_drawdown:.4f}")
         return 0
     
-    # Normal operation
     print(f"Starting Balance: PKR {ACCOUNT_BALANCE:,.0f}")
     print(f"Paper Trading: {'ACTIVE' if PAPER_TRADING else 'DISABLED'}")
     print(f"Telegram Alerts: {'ENABLED' if TELEGRAM_BOT_TOKEN else 'DISABLED'}")
     print(f"Universe: {len(symbols)} Shariah Stocks")
     print("=" * 80)
     
-    # 1. Fetch live prices
     print("📡 Fetching live prices from PSX website & multiple sources...")
     fetcher = UnifiedDataFetcher()
     live_prices = fetcher.fetch_all(symbols)
     for sym, data in live_prices.items():
         print(f"   {sym}: PKR {data['price']:.2f} (source: {data.get('source', 'unknown')})")
     
-    # 2. Dividends
     print("📅 Fetching dividend calendar...")
     dividends = get_upcoming_dividends(symbols)
     print(f"   Found {len(dividends)} upcoming dividends")
     
-    # 3. Historical data for indicators
     print("📊 Fetching historical data...")
     historical = {}
     try:
@@ -2381,11 +2357,9 @@ def main():
     except:
         pass
     
-    # 4. Sentiment
     print("📰 Fetching news sentiment...")
     sentiment = fetch_news_sentiment()
     
-    # 5. Generate signals
     print("🎯 Generating trading signals...")
     signals = []
     paper_engine = PaperTradingEngine()
@@ -2410,23 +2384,19 @@ def main():
             print(f"   ✅ {sym}: {signal.priority} — Yield {signal.dividend_yield:.2f}% (Confidence: {signal.confidence_score:.1%})")
             if PAPER_TRADING and risk_mgr.can_trade(paper_engine.balance):
                 paper_engine.buy(sym, price, signal.shares, signal.stop_loss, signal.target1, signal.target2)
-            # Backtest
             if ENABLE_BACKTESTING and historical.get(sym) is not None:
                 bt_engine = BacktestEngine()
                 ex_dates_for_sym = [{'ex_date': d['ex_date']} for d in EX_DATES.get(sym, [])]
                 res = bt_engine.run(sym, historical[sym], ex_dates_for_sym)
                 backtest_results.append(res)
-            # Collect returns for correlation
             if historical.get(sym) is not None:
                 close = historical[sym]['Close'] if 'Close' in historical[sym] else historical[sym].iloc[:, 3]
                 returns_for_corr[sym] = close.pct_change().dropna()
     
     print(f"   Generated {len(signals)} signals")
     
-    # 6. Update paper portfolio with live prices
     price_dict = {sym: data['price'] for sym, data in live_prices.items()}
     paper_engine.update_prices(price_dict)
-    # Check trailing stops
     for sym, pos in list(paper_engine.portfolio.items()):
         current = price_dict.get(sym, pos.avg_price)
         if paper_engine.check_trailing_stop(sym, current):
@@ -2434,14 +2404,12 @@ def main():
             paper_engine.sell(sym, current)
             risk_mgr.update(paper_engine.trades[-1].pnl)
     
-    # 7. Correlation matrix
     corr_matrix = None
     if returns_for_corr:
         returns_df = pd.DataFrame(returns_for_corr)
         if not returns_df.empty:
             corr_matrix = calculate_correlation_matrix(returns_df)
     
-    # 8. Market pulse
     market_pulse = indices = sectors = None
     try:
         import pypsx
@@ -2455,20 +2423,17 @@ def main():
     except:
         pass
     
-    # 9. Scenario analysis
     if args.mode == 'scenario':
         scenarios = run_scenario_analysis(signals, paper_engine)
         print("\n📉 Scenario Analysis:")
         for sc, pnl in scenarios.items():
             print(f"   {sc}: PKR {pnl:+.2f}")
     
-    # 10. Report
     print("📝 Generating HTML report...")
     html_report = generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
                                        indices, sectors, paper_engine, backtest_results,
                                        sentiment, config, corr_matrix)
     
-    # 11. Email
     print("📧 Sending email...")
     subject = f"PSX Dividend Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     if send_email(subject, html_report):
@@ -2476,7 +2441,6 @@ def main():
     else:
         print("❌ Email failed")
     
-    # 12. Telegram
     if signals and TELEGRAM_BOT_TOKEN:
         for sig in signals[:3]:
             send_telegram_signal(sig)
