@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v8.0
-The Absolute Best: Monthly Dividend Capture with Full Automation
-Features: Multi-Timeframe Entry, RSI Filter, Trailing Stops, Tiered Profit Taking, Drawdown Protection
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v8.1 — MORE FLEXIBLE
+Features: Relaxed Filters, Dividend Priority, Imminent Dividend Entry
 """
 
 import requests
@@ -23,14 +22,14 @@ RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 FROM_EMAIL = os.environ.get('FROM_EMAIL')
 TO_EMAIL = os.environ.get('TO_EMAIL')
 ACCOUNT_BALANCE = 30000
-MAX_RISK_PER_TRADE = 0.02           # 2% per trade
-MAX_PORTFOLIO_DRAWDOWN = 0.02        # 2% daily stop
-STOP_LOSS_PCT = 0.03                 # 3% stop-loss
-TARGET1_PCT = 0.05                   # 5% first target (50% of position)
-TARGET2_PCT = 0.08                   # 8% second target (remaining 50%)
-MIN_DIVIDEND_YIELD = 0.04            # 4% minimum yield
-MIN_VOLUME_CRORES = 2                # PKR 2 crore daily volume
-RISK_OFF_INDEX_DROP = 0.015          # 1.5% index drop triggers risk-off
+MAX_RISK_PER_TRADE = 0.02
+MAX_PORTFOLIO_DRAWDOWN = 0.02
+STOP_LOSS_PCT = 0.03
+TARGET1_PCT = 0.05
+TARGET2_PCT = 0.08
+MIN_DIVIDEND_YIELD = 0.04
+MIN_VOLUME_CRORES = 1  # Relaxed from 2 to 1 crore
+RISK_OFF_INDEX_DROP = 0.015
 PAPER_TRADING = True
 # ============================================================
 
@@ -83,7 +82,6 @@ def safe_float(val, default=0.0):
 # ============================================================
 
 def fetch_dividend_calendar():
-    """Fetch upcoming dividend dates and amounts."""
     today = datetime.now().date()
     upcoming = []
     active = []
@@ -207,13 +205,13 @@ def calculate_indicators(df):
     return indicators
 
 # ============================================================
-# ULTIMATE DIVIDEND CAPTURE SIGNAL
+# ULTIMATE DIVIDEND CAPTURE SIGNAL (RELAXED FILTERS)
 # ============================================================
 
 def generate_dividend_signal(symbol, price, stock_info, indicators, quote):
     """
-    Generate a dividend capture signal with multiple safety filters.
-    Only enters if ALL conditions are met.
+    Generate dividend capture signal with relaxed filters.
+    Dividend priority: If yield > 6% or ex-date <= 2 days, relax filters.
     """
     if price <= 0 or not stock_info:
         return None
@@ -223,17 +221,30 @@ def generate_dividend_signal(symbol, price, stock_info, indicators, quote):
     days_until = stock_info.get("days_until", 10)
     yield_pct = (div_amount / price) * 100
     
-    # Safety filters - ALL must pass
-    filters = {
-        'min_yield': yield_pct >= MIN_DIVIDEND_YIELD * 100,
-        'volume_ok': quote.get('volume', 0) >= MIN_VOLUME_CRORES * 1e7,
-        'sma_ok': indicators.get('sma_20') is None or price >= indicators.get('sma_20', 0) * 0.98,
-        'rsi_ok': indicators.get('rsi') is None or (35 <= indicators.get('rsi', 50) <= 65),
-        'timing_ok': 1 <= days_until <= 5,
-    }
+    # Check if this is a high-priority dividend
+    high_priority = yield_pct >= 6 or days_until <= 2
+    
+    # Safety filters - relaxed for high priority
+    if high_priority:
+        # Relaxed filters for high-priority dividends
+        filters = {
+            'min_yield': yield_pct >= 3.5,  # Relaxed from 4%
+            'volume_ok': quote.get('volume', 0) >= 0.5 * 1e7,  # Relaxed from 1 crore
+            'sma_ok': True,  # Remove SMA filter for high priority
+            'rsi_ok': indicators.get('rsi') is None or (25 <= indicators.get('rsi', 50) <= 75),  # Relaxed RSI
+            'timing_ok': 1 <= days_until <= 7,  # Expanded window
+        }
+    else:
+        # Standard filters
+        filters = {
+            'min_yield': yield_pct >= MIN_DIVIDEND_YIELD * 100,
+            'volume_ok': quote.get('volume', 0) >= MIN_VOLUME_CRORES * 1e7,
+            'sma_ok': indicators.get('sma_20') is None or price >= indicators.get('sma_20', 0) * 0.95,
+            'rsi_ok': indicators.get('rsi') is None or (30 <= indicators.get('rsi', 50) <= 70),
+            'timing_ok': 1 <= days_until <= 5,
+        }
     
     if not all(filters.values()):
-        # Log which filter failed
         failed_filters = [k for k, v in filters.items() if not v]
         return {
             'symbol': symbol,
@@ -244,28 +255,23 @@ def generate_dividend_signal(symbol, price, stock_info, indicators, quote):
             'days_until': days_until,
             'action': 'HOLD',
             'reason': f"Filters failed: {', '.join(failed_filters)}",
-            'filters': filters
+            'filters': filters,
+            'high_priority': high_priority
         }
     
-    # Entry: 1-3 days before ex-date
-    entry_day = max(0, days_until - 2)
-    
-    # Calculate position size (Kelly-like: use 95% of capital)
+    # Calculate position size
     shares = int(ACCOUNT_BALANCE * 0.95 / price)
-    
-    # Stop loss: 3% below entry
     stop_loss = price * (1 - STOP_LOSS_PCT)
-    
-    # Targets
     target1 = price * (1 + TARGET1_PCT)
     target2 = price * (1 + TARGET2_PCT)
     
-    # Risk-reward ratio
     risk = price - stop_loss
     reward1 = target1 - price
     reward2 = target2 - price
     rr1 = reward1 / risk if risk > 0 else 0
     rr2 = reward2 / risk if risk > 0 else 0
+    
+    priority_label = "⭐ HIGH PRIORITY" if high_priority else ""
     
     return {
         'symbol': symbol,
@@ -278,13 +284,14 @@ def generate_dividend_signal(symbol, price, stock_info, indicators, quote):
         'div_amount': div_amount,
         'yield_pct': yield_pct,
         'days_until': days_until,
-        'entry_day': f"T-{entry_day}" if entry_day > 0 else "T-0",
+        'entry_day': f"T-{max(0, days_until - 1)}",
         'exit_day': "T+3",
         'risk_reward1': round(rr1, 2),
         'risk_reward2': round(rr2, 2),
         'action': 'BUY',
+        'priority': priority_label,
         'filters': filters,
-        'reason': 'All filters passed'
+        'reason': 'All filters passed' + (f" [{priority_label}]" if high_priority else "")
     }
 
 # ============================================================
@@ -380,7 +387,6 @@ class PaperTradingEngine:
     def buy(self, symbol, price, quantity, stop_loss=None, target1=None, target2=None):
         cost = price * quantity
         if cost > self.balance:
-            print(f"❌ Insufficient balance. Need PKR {cost:.2f}, have PKR {self.balance:.2f}")
             return False
         self.balance -= cost
         self.portfolio[symbol] = {
@@ -392,48 +398,24 @@ class PaperTradingEngine:
             'entry_date': datetime.now()
         }
         self.trade_journal.log_trade(symbol, price, None, quantity, datetime.now(), None, None)
-        print(f"✅ BUY {quantity} {symbol} @ PKR {price:.2f} | Stop: {stop_loss} | T1: {target1} | T2: {target2}")
         return True
     
     def sell(self, symbol, price, quantity=None):
         if symbol not in self.portfolio:
-            print(f"❌ No position in {symbol}")
             return False
         pos = self.portfolio[symbol]
         if quantity is None:
             quantity = pos['quantity']
         if quantity > pos['quantity']:
-            print(f"❌ Not enough shares. Have {pos['quantity']}, want {quantity}")
             return False
         proceeds = price * quantity
         self.balance += proceeds
         pos['quantity'] -= quantity
         pnl = (price - pos['avg_price']) * quantity
         self.trade_journal.log_trade(symbol, pos['avg_price'], price, quantity, pos['entry_date'], datetime.now(), pnl)
-        print(f"✅ SELL {quantity} {symbol} @ PKR {price:.2f} | PnL: PKR {pnl:.2f}")
         if pos['quantity'] == 0:
             del self.portfolio[symbol]
         return True
-    
-    def check_positions(self, current_prices):
-        """Check all positions for stop-loss or target hits."""
-        actions = []
-        for symbol, pos in list(self.portfolio.items()):
-            price = current_prices.get(symbol, 0)
-            if price <= 0:
-                continue
-            # Stop-loss check
-            if pos['stop_loss'] and price <= pos['stop_loss']:
-                actions.append({'symbol': symbol, 'action': 'SELL (Stop Loss)', 'price': price})
-            # Target checks
-            elif pos['target1'] and price >= pos['target1']:
-                if pos['quantity'] > 1:
-                    # Sell 50% at target1
-                    sell_qty = max(1, int(pos['quantity'] * 0.5))
-                    actions.append({'symbol': symbol, 'action': 'SELL (50% Target1)', 'price': price, 'quantity': sell_qty})
-            elif pos['target2'] and price >= pos['target2']:
-                actions.append({'symbol': symbol, 'action': 'SELL (Target2)', 'price': price})
-        return actions
 
 # ============================================================
 # REPORT GENERATION
@@ -462,7 +444,7 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
             'ex_date': stock['ex_date'],
             'amount': stock['amount'],
             'days_until': days_until,
-            'status': '🔥 IMMINENT' if days_until <= 3 else 'UPCOMING'
+            'status': '🔥 IMMINENT' if days_until <= 2 else '🔶 SOON'
         })
     
     # Trade signals
@@ -476,11 +458,10 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
     journal_profit_factor = journal.get('profit_factor', 0)
     journal_max_drawdown = journal.get('max_drawdown', 0)
     
-    # Projected returns
     if buy_signals:
         avg_yield = np.mean([s.get('yield_pct', 0) for s in buy_signals])
         avg_rr = np.mean([s.get('risk_reward1', 0) for s in buy_signals])
-        projected_monthly = avg_yield + avg_rr * 0.5
+        projected_monthly = avg_yield + avg_rr * 0.3
         projected_annual = projected_monthly * 12
     else:
         projected_monthly = 0
@@ -517,14 +498,15 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
             .imminent {{ background: #ff4444; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
             .risk-off {{ background: #ff4444; color: white; padding: 2px 8px; border-radius: 12px; }}
             .risk-on {{ background: #00ff88; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; }}
+            .priority-badge {{ background: #ffaa00; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>💰 ULTIMATE DIVIDEND CAPTURE ENGINE v8.0</h1>
+            <h1>💰 ULTIMATE DIVIDEND CAPTURE ENGINE v8.1</h1>
             <p>Generated on {now}</p>
             <p>💰 Account: PKR {account_balance:,.0f} | 📊 {len(upcoming_dividends)} Upcoming Dividends</p>
-            <p>⚡ Monthly Cycle | Multi-Filter Entry | Tiered Profit Taking | Stop-Loss Protected</p>
+            <p>⚡ Monthly Cycle | Relaxed Filters | Priority Entry | Tiered Profit Taking</p>
             <p>🛡️ Mode: {risk_off_badge} | Max Daily Loss: {MAX_PORTFOLIO_DRAWDOWN*100:.0f}%</p>
             <p>📈 Projected Monthly Return: {projected_monthly:.2f}% | Annual: {projected_annual:.2f}%</p>
         </div>
@@ -546,12 +528,10 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
     """
     for div in div_calendar[:20]:
         days = div.get('days_until', 0)
-        if days <= 3:
+        if days <= 2:
             badge = f"<span class='imminent'>🔥 IMMINENT</span>"
-        elif days <= 7:
-            badge = f"<span class='upcoming'>🔶 SOON</span>"
         else:
-            badge = f"<span class='dividend-badge'>✅ UPCOMING</span>"
+            badge = f"<span class='upcoming'>🔶 SOON</span>"
         html += f"""
                     <tr>
                         <td><strong>{div['symbol']}</strong></td>
@@ -569,7 +549,7 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
 
         <div class="section highlight-box">
             <h2>🎯 Dividend Capture Trade Recommendations</h2>
-            <p><strong>Entry Filters:</strong> Min Yield {min_yield}% | Volume ≥ {min_vol} Cr | Price ≥ SMA20 | RSI 35-65</p>
+            <p><strong>Entry Filters (Relaxed):</strong> Yield ≥ 3.5% (Priority) or 4% (Standard) | Volume ≥ 0.5 Cr (Priority)</p>
             <p><strong>Exit Strategy:</strong> Stop Loss (-3%) | Target1 (+5%, sell 50%) | Target2 (+8%, sell 50%)</p>
             <table>
                 <thead>
@@ -578,36 +558,38 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
                         <th>Price</th>
                         <th>Entry Day</th>
                         <th>Ex-Date</th>
-                        <th>Exit Day</th>
                         <th>Div</th>
                         <th>Yield %</th>
                         <th>Stop</th>
                         <th>T1</th>
                         <th>T2</th>
                         <th>Shares</th>
+                        <th>Priority</th>
                         <th>Action</th>
                     </tr>
                 </thead>
                 <tbody>
     """
-    for signal in buy_signals[:10]:
-        html += f"""
-                    <tr class="signal-buy">
-                        <td><strong>{signal.get('symbol', 'N/A')}</strong></td>
-                        <td>{signal.get('entry_price', 'N/A')}</td>
-                        <td>{signal.get('entry_day', 'N/A')}</td>
-                        <td>{signal.get('ex_date', 'N/A')}</td>
-                        <td>{signal.get('exit_day', 'N/A')}</td>
-                        <td>{signal.get('div_amount', 0):.2f}</td>
-                        <td class="buy">{signal.get('yield_pct', 0):.2f}%</td>
-                        <td>{signal.get('stop_loss', 'N/A')}</td>
-                        <td>{signal.get('target1', 'N/A')}</td>
-                        <td>{signal.get('target2', 'N/A')}</td>
-                        <td>{signal.get('shares', 0)}</td>
-                        <td class="buy">🟢 BUY</td>
-                    </tr>
-        """
-    if not buy_signals:
+    if buy_signals:
+        for signal in buy_signals[:10]:
+            priority_badge = f"<span class='priority-badge'>{signal.get('priority', '')}</span>" if signal.get('priority') else ""
+            html += f"""
+                        <tr class="signal-buy">
+                            <td><strong>{signal.get('symbol', 'N/A')}</strong></td>
+                            <td>{signal.get('entry_price', 'N/A')}</td>
+                            <td>{signal.get('entry_day', 'N/A')}</td>
+                            <td>{signal.get('ex_date', 'N/A')}</td>
+                            <td>{signal.get('div_amount', 0):.2f}</td>
+                            <td class="buy">{signal.get('yield_pct', 0):.2f}%</td>
+                            <td>{signal.get('stop_loss', 'N/A')}</td>
+                            <td>{signal.get('target1', 'N/A')}</td>
+                            <td>{signal.get('target2', 'N/A')}</td>
+                            <td>{signal.get('shares', 0)}</td>
+                            <td>{priority_badge}</td>
+                            <td class="buy">🟢 BUY</td>
+                        </tr>
+            """
+    else:
         html += '<tr><td colspan="12">⚠️ No qualifying dividend capture signals available</td></tr>'
     html += """
                 </tbody>
@@ -652,22 +634,12 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
             <p><strong>Projected 12-Month:</strong> PKR {account_balance * (1 + projected_monthly/100)**12 - account_balance:,.2f}</p>
         </div>
 
-        <div class="section">
-            <h2>⏰ Monthly Cycle Schedule</h2>
-            <p><strong>Week 1-2:</strong> Screen for upcoming dividends with all safety filters</p>
-            <p><strong>Week 2-3:</strong> Enter positions 1-3 days before ex-date</p>
-            <p><strong>Week 3:</strong> Hold through ex-date, receive dividend</p>
-            <p><strong>Week 3-4:</strong> Exit at Target1 (5%), hold for Target2 (8%)</p>
-            <p><strong>Week 4:</strong> Stop-loss at -3% protects capital</p>
-            <p><strong>Repeat:</strong> Compound profits into next dividend cycle</p>
-        </div>
-
         <div class="footer">
             <p>🕌 All stocks Shariah-compliant (KMI All Share Index)</p>
-            <p>🛡️ Safety Filters: Yield ≥ 4% | Volume ≥ 2 Cr | SMA20 | RSI 35-65 | Stop-Loss -3% | Max DD 2%</p>
+            <p>🛡️ Safety Filters: Yield ≥ 3.5-4% | Volume ≥ 0.5-1 Cr | RSI 25-75 | Stop-Loss -3%</p>
             <p>💰 Tiered Profit Taking: 50% at +5%, 50% at +8%</p>
             <p>⚠️ No trading system eliminates risk. Always do your own research.</p>
-            <p>⚡ Generated by PSX Ultimate Dividend Capture Engine v8.0</p>
+            <p>⚡ Generated by PSX Ultimate Dividend Capture Engine v8.1</p>
         </div>
     </body>
     </html>
@@ -707,11 +679,11 @@ def send_html_email(subject, html_body):
 # ============================================================
 
 def main():
-    print("💰 ULTIMATE DIVIDEND CAPTURE ENGINE v8.0")
+    print("💰 ULTIMATE DIVIDEND CAPTURE ENGINE v8.1")
     print("=" * 80)
     print(f"💰 Starting Balance: PKR {ACCOUNT_BALANCE:,.0f}")
     print(f"📋 Paper Trading: {'ACTIVE' if PAPER_TRADING else 'DISABLED'}")
-    print(f"⚡ Strategy: Dividend Capture | Multi-Filter | Tiered Profit Taking")
+    print(f"⚡ Strategy: Dividend Capture | Relaxed Filters | Priority Entry")
     print(f"🛡️ Stop-Loss: {STOP_LOSS_PCT*100:.0f}% | Max Daily Loss: {MAX_PORTFOLIO_DRAWDOWN*100:.0f}%")
     print("=" * 80)
     
@@ -754,7 +726,7 @@ def main():
     sentiment_data = fetch_sentiment()
     
     # 6. Generate signals
-    print("🎯 Generating dividend capture signals with multi-filter...")
+    print("🎯 Generating dividend capture signals with relaxed filters...")
     signals = []
     for stock in upcoming_dividends:
         symbol = stock['symbol']
@@ -799,7 +771,7 @@ def main():
     )
     
     # 10. Send email
-    subject = f"💰 Dividend Capture Report - {len(upcoming_dividends)} Upcoming - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    subject = f"💰 Dividend Capture Report v8.1 - {len(upcoming_dividends)} Upcoming - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     success = send_html_email(subject, html_report)
     if success:
         print("✅ Report sent successfully!")
