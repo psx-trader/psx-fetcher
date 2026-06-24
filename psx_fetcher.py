@@ -1,7 +1,5 @@
-Here is the complete, raw Python script you can copy and paste directly into `psx_fetcher.py`. It includes the `import os` fix and is ready to run.
-
-```python
-#!/usr/bin/env python3
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.1 — THE COMPLETE 3000+ LINE SYSTEM
+... (#!/usr/bin/env python3
 """
 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.1 — THE COMPLETE 3000+ LINE SYSTEM
 Author: PSX Ultimate Engine
@@ -2454,5 +2452,6 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
-```
+    sys.exit(main())) ...
+if __name__ == "__main__":
+    sys.exit(main
