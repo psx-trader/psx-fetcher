@@ -1,7 +1,6 @@
-```python
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.2 — THE COMPLETE 3000+ LINE SYSTEM
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.2 - THE COMPLETE 3000+ LINE SYSTEM
 Author: PSX Ultimate Engine
 License: Personal Use Only
 Description: Fully automated Shariah-compliant dividend capture and swing trading system for PSX.
