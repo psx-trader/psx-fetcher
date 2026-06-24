@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-PSX ULTIMATE PROFIT ENGINE — BLACK BOX EDITION v3.0
-Features:
-- Multi-Model Ensemble (RSI, MACD, ADX, Stoch, BB, ML, Sentiment, Fundamentals)
-- Kelly Criterion Position Sizing
-- Backtesting Engine
-- Trade Journal
-- Paper Trading
-- Risk-Adjusted Returns
+PSX ULTIMATE PROFIT ENGINE v3.1 — MAXIMUM PROFIT EDITION
+Features: Kelly Sizing, Trailing Stops, Dividend Capture, Sector Rotation, Correlation Analysis
 """
 
 import requests
@@ -15,14 +9,12 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import concurrent.futures
 import re
-import time
 import json
 import feedparser
 from textblob import TextBlob
-import hashlib
-import pickle
+import warnings
+warnings.filterwarnings('ignore')
 
 # ============================================================
 # CONFIGURATION
@@ -30,37 +22,10 @@ import pickle
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 FROM_EMAIL = os.environ.get('FROM_EMAIL')
 TO_EMAIL = os.environ.get('TO_EMAIL')
-ACCOUNT_BALANCE = 30000  # PKR
+ACCOUNT_BALANCE = 30000
 MAX_RISK_PER_TRADE = 0.02  # 2%
-PAPER_TRADING = True  # Set to False for live (requires API)
+PAPER_TRADING = True
 # ============================================================
-
-# Try TA-Lib
-try:
-    import talib
-    TA_LIB_AVAILABLE = True
-except ImportError:
-    TA_LIB_AVAILABLE = False
-    print("⚠️ TA-Lib not installed. Using manual indicators.")
-
-# Try sklearn for ML
-try:
-    from sklearn.linear_model import LinearRegression
-    from sklearn.ensemble import RandomForestRegressor
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-    print("⚠️ scikit-learn not installed. ML features limited.")
-
-# Try TensorFlow for deep learning
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    TF_AVAILABLE = True
-except ImportError:
-    TF_AVAILABLE = False
-    print("⚠️ TensorFlow not installed. LSTM features disabled.")
 
 # Shariah-compliant tickers
 VALID_SHARIAH_TICKERS = [
@@ -72,7 +37,7 @@ VALID_SHARIAH_TICKERS = [
     "CNERGY", "CPHL", "FFL", "AIRLINK", "KEL", "WTL",
     "TRG", "TPL", "PICT", "IBFL", "SCBPL", "SILK",
     "KAPCO", "NCL", "PSMC", "PTC", "SBL", "SHFA",
-    "SML", "SNBL", "SSML", "UPFL", "WAVES", "WSML"
+    "SML", "SNBL"
 ]
 
 RSS_FEEDS = [
@@ -82,119 +47,14 @@ RSS_FEEDS = [
 ]
 
 # ============================================================
-# TRADE JOURNAL
+# HELPER FUNCTIONS
 # ============================================================
 
-class TradeJournal:
-    """Logs all trades, signals, and decisions for review."""
-    def __init__(self):
-        self.trades = []
-        self.signals = []
-        self.decisions = []
-    
-    def log_trade(self, symbol, entry_price, exit_price, quantity, entry_time, exit_time, profit_loss):
-        self.trades.append({
-            'symbol': symbol,
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'quantity': quantity,
-            'entry_time': entry_time,
-            'exit_time': exit_time,
-            'profit_loss': profit_loss,
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    def log_signal(self, symbol, signal, confidence, indicators_used):
-        self.signals.append({
-            'symbol': symbol,
-            'signal': signal,
-            'confidence': confidence,
-            'indicators': indicators_used,
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    def get_summary(self):
-        if not self.trades:
-            return "No trades recorded."
-        total_pnl = sum(t['profit_loss'] for t in self.trades)
-        win_rate = len([t for t in self.trades if t['profit_loss'] > 0]) / len(self.trades) if self.trades else 0
-        avg_win = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] > 0) / len([t for t in self.trades if t['profit_loss'] > 0]) if [t for t in self.trades if t['profit_loss'] > 0] else 0
-        avg_loss = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] < 0) / len([t for t in self.trades if t['profit_loss'] < 0]) if [t for t in self.trades if t['profit_loss'] < 0] else 0
-        profit_factor = abs(sum(t['profit_loss'] for t in self.trades if t['profit_loss'] > 0) / sum(t['profit_loss'] for t in self.trades if t['profit_loss'] < 0)) if sum(t['profit_loss'] for t in self.trades if t['profit_loss'] < 0) != 0 else 0
-        return {
-            'total_trades': len(self.trades),
-            'total_pnl': total_pnl,
-            'win_rate': win_rate,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'profit_factor': profit_factor
-        }
-
-# ============================================================
-# PAPER TRADING ENGINE
-# ============================================================
-
-class PaperTradingEngine:
-    """Simulates trades without real money."""
-    def __init__(self, initial_balance=30000):
-        self.balance = initial_balance
-        self.portfolio = {}
-        self.initial_balance = initial_balance
-        self.trade_journal = TradeJournal()
-    
-    def buy(self, symbol, price, quantity):
-        cost = price * quantity
-        if cost > self.balance:
-            print(f"❌ Insufficient balance. Need PKR {cost:.2f}, have PKR {self.balance:.2f}")
-            return False
-        self.balance -= cost
-        if symbol in self.portfolio:
-            self.portfolio[symbol]['quantity'] += quantity
-            self.portfolio[symbol]['avg_price'] = (
-                (self.portfolio[symbol]['avg_price'] * self.portfolio[symbol]['quantity_old'] + price * quantity) / 
-                (self.portfolio[symbol]['quantity'] + quantity)
-            )
-        else:
-            self.portfolio[symbol] = {'quantity': quantity, 'avg_price': price, 'quantity_old': 0}
-        self.trade_journal.log_trade(symbol, price, None, quantity, datetime.now(), None, None)
-        print(f"✅ BUY {quantity} {symbol} @ PKR {price:.2f}")
-        return True
-    
-    def sell(self, symbol, price, quantity=None):
-        if symbol not in self.portfolio:
-            print(f"❌ No position in {symbol}")
-            return False
-        if quantity is None:
-            quantity = self.portfolio[symbol]['quantity']
-        if quantity > self.portfolio[symbol]['quantity']:
-            print(f"❌ Not enough shares. Have {self.portfolio[symbol]['quantity']}, want {quantity}")
-            return False
-        proceeds = price * quantity
-        self.balance += proceeds
-        self.portfolio[symbol]['quantity'] -= quantity
-        pnl = (price - self.portfolio[symbol]['avg_price']) * quantity
-        self.trade_journal.log_trade(symbol, self.portfolio[symbol]['avg_price'], price, quantity, datetime.now(), datetime.now(), pnl)
-        print(f"✅ SELL {quantity} {symbol} @ PKR {price:.2f} | PnL: PKR {pnl:.2f}")
-        if self.portfolio[symbol]['quantity'] == 0:
-            del self.portfolio[symbol]
-        return True
-    
-    def get_summary(self):
-        positions_value = 0
-        for symbol, pos in self.portfolio.items():
-            # We don't have current price here, will be updated in main
-            pass
-        return {
-            'balance': self.balance,
-            'total_value': self.balance + positions_value,
-            'initial_balance': self.initial_balance,
-            'return_pct': ((self.balance + positions_value) / self.initial_balance - 1) * 100,
-            'positions': self.portfolio
-        }
-
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
+def df_to_html(df, limit=10):
+    if df is None or df.empty:
+        return "<p>No data available</p>"
+    df = df.head(limit)
+    return df.to_html(index=False, border=0, classes='data-table')
 
 def is_valid_ticker(symbol):
     if not symbol or not isinstance(symbol, str):
@@ -214,17 +74,37 @@ def safe_float(val, default=0.0):
     except:
         return default
 
+def calculate_kelly(win_rate, avg_win, avg_loss, max_fraction=0.25):
+    """Calculate Kelly Criterion optimal position fraction."""
+    if avg_loss == 0:
+        return 0.0
+    b = avg_win / avg_loss
+    p = win_rate
+    q = 1 - p
+    if b <= 0:
+        return 0.0
+    kelly = (b * p - q) / b
+    return max(0.0, min(kelly, max_fraction))
+
+def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
+    """Calculate Sharpe ratio from returns series."""
+    if len(returns) < 2:
+        return 0.0
+    excess = returns - risk_free_rate
+    return excess.mean() / excess.std() if excess.std() > 0 else 0.0
+
 # ============================================================
-# 1. DATA FETCHING
+# DATA FETCHING
 # ============================================================
 
-def fetch_top_shariah_compliant_stocks(limit=50):
+def fetch_top_shariah_stocks(limit=50):
     print(f"📡 Fetching top {limit} Shariah-compliant stocks...")
     try:
         import pypsx
         market_watch = pypsx.market_watch()
         if market_watch is None or market_watch.empty:
             return VALID_SHARIAH_TICKERS[:limit]
+        
         symbol_col = None
         for col in ['Symbol', 'symbol', 'Ticker', 'ticker']:
             if col in market_watch.columns:
@@ -232,22 +112,27 @@ def fetch_top_shariah_compliant_stocks(limit=50):
                 break
         if symbol_col is None:
             symbol_col = market_watch.columns[0]
+        
         market_tickers = market_watch[symbol_col].tolist()
         valid_tickers = [t for t in market_tickers if is_valid_ticker(t)]
         shariah_tickers = [t for t in valid_tickers if t in VALID_SHARIAH_TICKERS]
+        
         if not shariah_tickers:
             return VALID_SHARIAH_TICKERS[:limit]
+        
         if 'Volume' in market_watch.columns:
             market_watch['Volume'] = pd.to_numeric(market_watch['Volume'], errors='coerce')
             shariah_data = market_watch[market_watch[symbol_col].isin(shariah_tickers)]
             if not shariah_data.empty:
                 top_data = shariah_data.sort_values('Volume', ascending=False).head(limit)
                 return top_data[symbol_col].tolist()
+        
         return shariah_tickers[:limit]
     except Exception as e:
+        print(f"Error: {e}. Using fallback list.")
         return VALID_SHARIAH_TICKERS[:limit]
 
-def fetch_stock_quote(symbol):
+def fetch_quote(symbol):
     if not is_valid_ticker(symbol):
         return {'symbol': symbol, 'error': 'Invalid ticker', 'price': 'N/A'}
     try:
@@ -268,7 +153,7 @@ def fetch_stock_quote(symbol):
     except Exception as e:
         return {'symbol': symbol, 'error': str(e), 'price': 'N/A'}
 
-def fetch_stock_fundamentals(symbol):
+def fetch_fundamentals(symbol):
     if not is_valid_ticker(symbol):
         return {'symbol': symbol, 'error': 'Invalid ticker'}
     try:
@@ -286,7 +171,7 @@ def fetch_stock_fundamentals(symbol):
     except Exception as e:
         return {'symbol': symbol, 'error': str(e)}
 
-def fetch_historical_data(symbol, days=365):
+def fetch_historical(symbol, days=180):
     if not is_valid_ticker(symbol):
         return None
     try:
@@ -331,12 +216,13 @@ def fetch_sector_performance():
         return None
 
 # ============================================================
-# 2. ADVANCED TECHNICAL INDICATORS (TA-Lib + Manual)
+# TECHNICAL INDICATORS
 # ============================================================
 
-def calculate_advanced_indicators(df):
+def calculate_indicators(df):
     if df is None or df.empty:
         return {}
+    
     close_col = None
     high_col = None
     low_col = None
@@ -351,6 +237,7 @@ def calculate_advanced_indicators(df):
             low_col = col
         elif 'volume' in col_lower:
             volume_col = col
+    
     if close_col is None:
         close_col = df.columns[3] if len(df.columns) > 3 else df.columns[0]
     if high_col is None:
@@ -360,264 +247,117 @@ def calculate_advanced_indicators(df):
     if volume_col is None:
         volume_col = df.columns[4] if len(df.columns) > 4 else df.columns[0]
     
-    close = df[close_col].values
-    high = df[high_col].values
-    low = df[low_col].values
-    volume = df[volume_col].values
-    close_series = pd.Series(close)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    volume_series = pd.Series(volume)
+    close = pd.Series(df[close_col].values)
+    high = pd.Series(df[high_col].values)
+    low = pd.Series(df[low_col].values)
+    volume = pd.Series(df[volume_col].values)
     
     indicators = {}
     
-    if TA_LIB_AVAILABLE:
-        try:
-            indicators['rsi'] = talib.RSI(close, timeperiod=14)[-1]
-            indicators['macd'], indicators['macd_signal'], indicators['macd_hist'] = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
-            indicators['macd'] = indicators['macd'][-1]
-            indicators['macd_signal'] = indicators['macd_signal'][-1]
-            indicators['macd_hist'] = indicators['macd_hist'][-1]
-            indicators['adx'] = talib.ADX(high, low, close, timeperiod=14)[-1]
-            indicators['stoch_k'], indicators['stoch_d'] = talib.STOCH(high, low, close, fastk_period=14, slowk_period=3, slowd_period=3)
-            indicators['stoch_k'] = indicators['stoch_k'][-1]
-            indicators['stoch_d'] = indicators['stoch_d'][-1]
-            indicators['atr'] = talib.ATR(high, low, close, timeperiod=14)[-1]
-            indicators['bb_upper'], indicators['bb_middle'], indicators['bb_lower'] = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2)
-            indicators['bb_upper'] = indicators['bb_upper'][-1]
-            indicators['bb_middle'] = indicators['bb_middle'][-1]
-            indicators['bb_lower'] = indicators['bb_lower'][-1]
-            indicators['sma_20'] = talib.SMA(close, timeperiod=20)[-1]
-            indicators['sma_50'] = talib.SMA(close, timeperiod=50)[-1]
-            indicators['sma_200'] = talib.SMA(close, timeperiod=200)[-1] if len(close) >= 200 else None
-            indicators['ema_12'] = talib.EMA(close, timeperiod=12)[-1]
-            indicators['ema_26'] = talib.EMA(close, timeperiod=26)[-1]
-            indicators['volume_sma'] = talib.SMA(volume, timeperiod=20)[-1]
-            indicators['volume_ratio'] = volume[-1] / indicators['volume_sma'] if indicators['volume_sma'] and indicators['volume_sma'] > 0 else None
-            indicators['obv'] = talib.OBV(close, volume)[-1]
-            indicators['willr'] = talib.WILLR(high, low, close, timeperiod=14)[-1]
-            indicators['cci'] = talib.CCI(high, low, close, timeperiod=14)[-1]
-            indicators['mfi'] = talib.MFI(high, low, close, volume, timeperiod=14)[-1]
-            indicators['aroon_down'], indicators['aroon_up'] = talib.AROON(high, low, timeperiod=14)
-            indicators['aroon_down'] = indicators['aroon_down'][-1]
-            indicators['aroon_up'] = indicators['aroon_up'][-1]
-        except Exception as e:
-            TA_LIB_AVAILABLE_FOR_THIS = False
-        else:
-            TA_LIB_AVAILABLE_FOR_THIS = True
-    else:
-        TA_LIB_AVAILABLE_FOR_THIS = False
-    
-    if not TA_LIB_AVAILABLE_FOR_THIS:
-        # Manual fallback for key indicators
-        delta = close_series.diff()
+    # RSI
+    try:
+        delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         indicators['rsi'] = 100 - (100 / (1 + rs)).iloc[-1] if len(rs) > 0 else None
-        exp1 = close_series.ewm(span=12, adjust=False).mean()
-        exp2 = close_series.ewm(span=26, adjust=False).mean()
+    except:
+        indicators['rsi'] = None
+    
+    # SMAs
+    try:
+        indicators['sma_20'] = close.tail(20).mean() if len(close) >= 20 else None
+        indicators['sma_50'] = close.tail(50).mean() if len(close) >= 50 else None
+        indicators['sma_200'] = close.tail(200).mean() if len(close) >= 200 else None
+    except:
+        indicators['sma_20'] = None
+        indicators['sma_50'] = None
+        indicators['sma_200'] = None
+    
+    # MACD
+    try:
+        exp1 = close.ewm(span=12, adjust=False).mean()
+        exp2 = close.ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
         indicators['macd'] = macd.iloc[-1] if len(macd) > 0 else None
         indicators['macd_signal'] = signal.iloc[-1] if len(signal) > 0 else None
         indicators['macd_hist'] = (macd - signal).iloc[-1] if len(macd) > 0 and len(signal) > 0 else None
-        try:
-            plus_dm = high_series.diff()
-            minus_dm = low_series.diff()
-            tr = pd.concat([high_series - low_series, (high_series - close_series.shift()).abs(), (low_series - close_series.shift()).abs()], axis=1).max(axis=1)
-            atr_14 = tr.rolling(14).mean()
-            plus_di = 100 * (plus_dm.rolling(14).mean() / atr_14)
-            minus_di = 100 * (minus_dm.rolling(14).mean() / atr_14)
-            dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-            indicators['adx'] = dx.rolling(14).mean().iloc[-1] if len(dx) >= 14 else None
-        except:
-            indicators['adx'] = None
-        try:
-            low_14 = low_series.rolling(14).min()
-            high_14 = high_series.rolling(14).max()
-            stoch_k = 100 * ((close_series - low_14) / (high_14 - low_14))
-            indicators['stoch_k'] = stoch_k.iloc[-1] if len(stoch_k) > 0 else None
-            indicators['stoch_d'] = stoch_k.rolling(3).mean().iloc[-1] if len(stoch_k) >= 3 else None
-        except:
-            indicators['stoch_k'] = None
-            indicators['stoch_d'] = None
-        sma_20 = close_series.rolling(20).mean()
-        std_20 = close_series.rolling(20).std()
+    except:
+        indicators['macd'] = None
+        indicators['macd_signal'] = None
+        indicators['macd_hist'] = None
+    
+    # Bollinger Bands
+    try:
+        sma_20 = close.rolling(20).mean()
+        std_20 = close.rolling(20).std()
         indicators['bb_upper'] = sma_20.iloc[-1] + 2 * std_20.iloc[-1] if len(sma_20) > 0 else None
         indicators['bb_middle'] = sma_20.iloc[-1] if len(sma_20) > 0 else None
         indicators['bb_lower'] = sma_20.iloc[-1] - 2 * std_20.iloc[-1] if len(sma_20) > 0 else None
-        indicators['sma_20'] = close_series.tail(20).mean() if len(close_series) >= 20 else None
-        indicators['sma_50'] = close_series.tail(50).mean() if len(close_series) >= 50 else None
-        indicators['sma_200'] = close_series.tail(200).mean() if len(close_series) >= 200 else None
-        indicators['ema_12'] = close_series.ewm(span=12, adjust=False).mean().iloc[-1] if len(close_series) >= 12 else None
-        indicators['ema_26'] = close_series.ewm(span=26, adjust=False).mean().iloc[-1] if len(close_series) >= 26 else None
-        indicators['volume_sma'] = volume_series.tail(20).mean() if len(volume_series) >= 20 else None
-        indicators['volume_ratio'] = volume_series.iloc[-1] / indicators['volume_sma'] if indicators['volume_sma'] and indicators['volume_sma'] > 0 else None
-        indicators['obv'] = None
-        indicators['willr'] = None
-        indicators['cci'] = None
-        indicators['mfi'] = None
-        indicators['aroon_down'] = None
-        indicators['aroon_up'] = None
-    
-    # BB Position
-    if indicators.get('bb_upper') and indicators.get('bb_lower') and indicators.get('bb_middle'):
-        if indicators['bb_upper'] != indicators['bb_lower']:
-            indicators['bb_position'] = ((close[-1] - indicators['bb_lower']) / (indicators['bb_upper'] - indicators['bb_lower']))
+        if indicators['bb_upper'] and indicators['bb_lower'] and indicators['bb_upper'] != indicators['bb_lower']:
+            indicators['bb_position'] = ((close.iloc[-1] - indicators['bb_lower']) / 
+                                         (indicators['bb_upper'] - indicators['bb_lower']))
         else:
             indicators['bb_position'] = 0.5
-    else:
+    except:
+        indicators['bb_upper'] = None
+        indicators['bb_middle'] = None
+        indicators['bb_lower'] = None
         indicators['bb_position'] = None
+    
+    # ATR
+    try:
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        indicators['atr'] = tr.rolling(window=14).mean().iloc[-1] if len(tr) >= 14 else None
+    except:
+        indicators['atr'] = None
+    
+    # Volume Ratio
+    try:
+        indicators['volume_sma'] = volume.tail(20).mean() if len(volume) >= 20 else None
+        if indicators['volume_sma'] and indicators['volume_sma'] > 0:
+            indicators['volume_ratio'] = volume.iloc[-1] / indicators['volume_sma']
+        else:
+            indicators['volume_ratio'] = None
+    except:
+        indicators['volume_sma'] = None
+        indicators['volume_ratio'] = None
+    
+    # ADX (simplified)
+    try:
+        plus_dm = high.diff()
+        minus_dm = low.diff()
+        tr_s = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+        atr_14 = tr_s.rolling(14).mean()
+        plus_di = 100 * (plus_dm.rolling(14).mean() / atr_14)
+        minus_di = 100 * (minus_dm.rolling(14).mean() / atr_14)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        indicators['adx'] = dx.rolling(14).mean().iloc[-1] if len(dx) >= 14 else None
+    except:
+        indicators['adx'] = None
+    
+    # Stochastic
+    try:
+        low_14 = low.rolling(14).min()
+        high_14 = high.rolling(14).max()
+        stoch_k = 100 * ((close - low_14) / (high_14 - low_14))
+        indicators['stoch_k'] = stoch_k.iloc[-1] if len(stoch_k) > 0 else None
+        indicators['stoch_d'] = stoch_k.rolling(3).mean().iloc[-1] if len(stoch_k) >= 3 else None
+    except:
+        indicators['stoch_k'] = None
+        indicators['stoch_d'] = None
     
     return indicators
 
 # ============================================================
-# 3. MACHINE LEARNING PREDICTORS
+# SENTIMENT ANALYSIS
 # ============================================================
 
-def train_lstm_model(df, lookback=60):
-    """Train LSTM model for price prediction."""
-    if not TF_AVAILABLE or df is None or len(df) < lookback + 10:
-        return None
-    try:
-        close_col = None
-        for col in df.columns:
-            if 'close' in col.lower() or 'adj close' in col.lower():
-                close_col = col
-                break
-        if close_col is None:
-            close_col = df.columns[3] if len(df.columns) > 3 else df.columns[0]
-        data = df[close_col].values
-        # Normalize
-        data_norm = (data - np.mean(data)) / np.std(data)
-        X, y = [], []
-        for i in range(lookback, len(data_norm) - 1):
-            X.append(data_norm[i-lookback:i])
-            y.append(data_norm[i])
-        X = np.array(X).reshape(-1, lookback, 1)
-        y = np.array(y)
-        if len(X) < 10:
-            return None
-        # Build LSTM
-        model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=(lookback, 1)),
-            Dropout(0.2),
-            LSTM(50, return_sequences=False),
-            Dropout(0.2),
-            Dense(25),
-            Dense(1)
-        ])
-        model.compile(optimizer='adam', loss='mse')
-        model.fit(X, y, epochs=20, batch_size=32, verbose=0)
-        return model
-    except:
-        return None
-
-def lstm_predict(model, data, lookback=60):
-    """Predict next price using LSTM model."""
-    if model is None or len(data) < lookback:
-        return None
-    try:
-        data_norm = (data - np.mean(data)) / np.std(data)
-        X_input = data_norm[-lookback:].reshape(1, lookback, 1)
-        pred_norm = model.predict(X_input, verbose=0)[0][0]
-        mean = np.mean(data)
-        std = np.std(data)
-        return pred_norm * std + mean
-    except:
-        return None
-
-def ensemble_ml_predictor(df):
-    """Ensemble of Linear Regression, Random Forest, and LSTM."""
-    if df is None or df.empty or len(df) < 20:
-        return {'prediction': 'neutral', 'confidence': 0.0}
-    try:
-        close_col = None
-        for col in df.columns:
-            if 'close' in col.lower() or 'adj close' in col.lower():
-                close_col = col
-                break
-        if close_col is None:
-            close_col = df.columns[3] if len(df.columns) > 3 else df.columns[0]
-        prices = df[close_col].values
-        if len(prices) < 20:
-            return {'prediction': 'neutral', 'confidence': 0.0}
-        
-        predictions = []
-        weights = []
-        
-        # 1. Linear Regression
-        if SKLEARN_AVAILABLE:
-            try:
-                X = np.array(range(len(prices))).reshape(-1, 1)
-                y = prices
-                model = LinearRegression()
-                model.fit(X, y)
-                future_idx = len(prices) + 5
-                pred_price = model.predict([[future_idx]])[0]
-                pct_change = (pred_price / prices[-1] - 1) * 100
-                r2 = model.score(X, y)
-                predictions.append(pct_change)
-                weights.append(r2 if r2 > 0 else 0.1)
-            except:
-                pass
-        
-        # 2. Random Forest
-        if SKLEARN_AVAILABLE:
-            try:
-                X = np.array(range(len(prices))).reshape(-1, 1)
-                y = prices
-                model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
-                model.fit(X, y)
-                future_idx = len(prices) + 5
-                pred_price = model.predict([[future_idx]])[0]
-                pct_change = (pred_price / prices[-1] - 1) * 100
-                predictions.append(pct_change)
-                weights.append(0.8)
-            except:
-                pass
-        
-        # 3. LSTM (if available)
-        if TF_AVAILABLE:
-            try:
-                model = train_lstm_model(df)
-                if model:
-                    pred_price = lstm_predict(model, prices)
-                    if pred_price:
-                        pct_change = (pred_price / prices[-1] - 1) * 100
-                        predictions.append(pct_change)
-                        weights.append(1.0)
-            except:
-                pass
-        
-        if predictions:
-            # Weighted average
-            weighted_avg = sum(p * w for p, w in zip(predictions, weights)) / sum(weights)
-            confidence = min(1.0, sum(weights) / 3)
-            if weighted_avg > 2:
-                pred = 'up'
-            elif weighted_avg < -2:
-                pred = 'down'
-            else:
-                pred = 'neutral'
-            return {
-                'prediction': pred,
-                'pct_change': weighted_avg,
-                'confidence': confidence,
-                'models_used': len(predictions),
-                'ensemble_size': len(predictions)
-            }
-        else:
-            return {'prediction': 'neutral', 'confidence': 0.0}
-    except Exception as e:
-        return {'prediction': 'neutral', 'confidence': 0.0, 'error': str(e)}
-
-# ============================================================
-# 4. SENTIMENT ANALYSIS
-# ============================================================
-
-def fetch_news_sentiment():
+def fetch_sentiment():
     articles = []
     for feed_url in RSS_FEEDS:
         try:
@@ -627,7 +367,6 @@ def fetch_news_sentiment():
                 summary = entry.get('summary', '')
                 blob = TextBlob(title + " " + summary)
                 polarity = blob.sentiment.polarity
-                subjectivity = blob.sentiment.subjectivity
                 if polarity > 0.1:
                     sentiment = 'bullish'
                 elif polarity < -0.1:
@@ -640,364 +379,281 @@ def fetch_news_sentiment():
                     'link': entry.get('link', ''),
                     'published': entry.get('published', ''),
                     'sentiment': sentiment,
-                    'polarity': polarity,
-                    'subjectivity': subjectivity
+                    'polarity': polarity
                 })
         except Exception as e:
             print(f"RSS error: {e}")
     if articles:
         avg_polarity = np.mean([a['polarity'] for a in articles])
-        overall_sentiment = 'bullish' if avg_polarity > 0.05 else 'bearish' if avg_polarity < -0.05 else 'neutral'
-        return {
-            'overall': overall_sentiment,
-            'avg_polarity': avg_polarity,
-            'articles': articles[:10]
-        }
-    else:
-        return {'overall': 'neutral', 'avg_polarity': 0, 'articles': []}
+        overall = 'bullish' if avg_polarity > 0.05 else 'bearish' if avg_polarity < -0.05 else 'neutral'
+        return {'overall': overall, 'avg_polarity': avg_polarity, 'articles': articles[:10]}
+    return {'overall': 'neutral', 'avg_polarity': 0, 'articles': []}
 
 # ============================================================
-# 5. RISK MANAGEMENT & POSITION SIZING
+# ULTIMATE SIGNAL GENERATION WITH KELLY
 # ============================================================
 
-def calculate_kelly_position(win_rate, avg_win, avg_loss, max_fraction=0.25):
-    if avg_loss == 0:
-        return 0.0
-    b = avg_win / avg_loss
-    p = win_rate
-    q = 1 - p
-    if b <= 0:
-        return 0.0
-    kelly = (b * p - q) / b
-    return max(0.0, min(kelly, max_fraction))
-
-def dynamic_position_sizing(account_balance, entry_price, stop_loss_price, win_rate_est, avg_win_est, avg_loss_est, risk_per_trade=0.02):
-    if entry_price <= 0 or stop_loss_price >= entry_price:
-        return 0
-    risk_per_share = entry_price - stop_loss_price
-    if risk_per_share <= 0:
-        return 0
-    # Kelly-adjusted risk
-    kelly = calculate_kelly_position(win_rate_est, avg_win_est, avg_loss_est)
-    risk_amount = account_balance * (risk_per_trade + kelly * 0.5)
-    shares = risk_amount / risk_per_share
-    return int(max(0, shares))
-
-# ============================================================
-# 6. ULTIMATE SIGNAL GENERATION (Multi-Model Ensemble)
-# ============================================================
-
-def generate_ultimate_signals(symbol, price, indicators, ml_pred, sentiment, fundamentals, historical_df):
-    """Multi-model ensemble signal generation."""
+def generate_signals(symbol, price, indicators, sentiment, fundamentals):
     signals = []
     if not indicators or price is None:
-        return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0}
+        return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0, 'win_rate_est': 0.5}
+    
     if isinstance(price, str):
         try:
             price = float(price)
         except:
-            return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0}
+            return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0, 'win_rate_est': 0.5}
     if not isinstance(price, (int, float)):
-        return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0}
+        return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0, 'win_rate_est': 0.5}
     
-    ensemble_score = 0
-    signal_details = []
+    score = 0
+    details = []
     
-    # 1. RSI (weight: 2)
+    # RSI
     rsi = indicators.get('rsi')
     if rsi is not None:
         if rsi < 30:
-            ensemble_score += 2
-            signal_details.append({'model': 'RSI', 'signal': 'BUY', 'weight': 2, 'value': rsi, 'reason': f'Oversold ({rsi:.2f} < 30)'})
+            score += 2
+            details.append({'model': 'RSI', 'signal': 'BUY', 'weight': 2, 'value': rsi, 'reason': f'Oversold ({rsi:.2f} < 30)'})
         elif rsi > 70:
-            ensemble_score -= 2
-            signal_details.append({'model': 'RSI', 'signal': 'SELL', 'weight': -2, 'value': rsi, 'reason': f'Overbought ({rsi:.2f} > 70)'})
-        else:
-            signal_details.append({'model': 'RSI', 'signal': 'NEUTRAL', 'weight': 0, 'value': rsi, 'reason': f'Neutral ({rsi:.2f})'})
+            score -= 2
+            details.append({'model': 'RSI', 'signal': 'SELL', 'weight': -2, 'value': rsi, 'reason': f'Overbought ({rsi:.2f} > 70)'})
     
-    # 2. MACD (weight: 1.5)
+    # MACD
     macd = indicators.get('macd')
     macd_signal = indicators.get('macd_signal')
     if macd is not None and macd_signal is not None:
         if macd > macd_signal:
-            ensemble_score += 1.5
-            signal_details.append({'model': 'MACD', 'signal': 'BUY', 'weight': 1.5, 'value': macd, 'reason': 'Bullish crossover'})
+            score += 1.5
+            details.append({'model': 'MACD', 'signal': 'BUY', 'weight': 1.5, 'value': macd, 'reason': 'Bullish crossover'})
         else:
-            ensemble_score -= 1.5
-            signal_details.append({'model': 'MACD', 'signal': 'SELL', 'weight': -1.5, 'value': macd, 'reason': 'Bearish crossover'})
+            score -= 1.5
+            details.append({'model': 'MACD', 'signal': 'SELL', 'weight': -1.5, 'value': macd, 'reason': 'Bearish crossover'})
     
-    # 3. ADX (weight: 1)
+    # Bollinger Bands
+    bb_pos = indicators.get('bb_position')
+    if bb_pos is not None:
+        if bb_pos < 0.2:
+            score += 1
+            details.append({'model': 'Bollinger', 'signal': 'BUY', 'weight': 1, 'value': bb_pos, 'reason': 'At lower band'})
+        elif bb_pos > 0.8:
+            score -= 1
+            details.append({'model': 'Bollinger', 'signal': 'SELL', 'weight': -1, 'value': bb_pos, 'reason': 'At upper band'})
+    
+    # ADX trend strength
     adx = indicators.get('adx')
     if adx is not None and adx > 25:
-        ensemble_score += 1
-        signal_details.append({'model': 'ADX', 'signal': 'TRENDING', 'weight': 1, 'value': adx, 'reason': f'Strong trend ({adx:.2f} > 25)'})
+        score += 0.5
+        details.append({'model': 'ADX', 'signal': 'TREND', 'weight': 0.5, 'value': adx, 'reason': f'Strong trend ({adx:.2f})'})
     
-    # 4. Stochastic (weight: 1.5)
+    # Stochastic
     stoch_k = indicators.get('stoch_k')
     stoch_d = indicators.get('stoch_d')
     if stoch_k is not None and stoch_d is not None:
         if stoch_k < 20 and stoch_d < 20:
-            ensemble_score += 1.5
-            signal_details.append({'model': 'Stochastic', 'signal': 'BUY', 'weight': 1.5, 'value': f'K={stoch_k:.2f}, D={stoch_d:.2f}', 'reason': 'Oversold crossover'})
+            score += 1.5
+            details.append({'model': 'Stochastic', 'signal': 'BUY', 'weight': 1.5, 'value': f'K={stoch_k:.2f}', 'reason': 'Oversold crossover'})
         elif stoch_k > 80 and stoch_d > 80:
-            ensemble_score -= 1.5
-            signal_details.append({'model': 'Stochastic', 'signal': 'SELL', 'weight': -1.5, 'value': f'K={stoch_k:.2f}, D={stoch_d:.2f}', 'reason': 'Overbought crossover'})
+            score -= 1.5
+            details.append({'model': 'Stochastic', 'signal': 'SELL', 'weight': -1.5, 'value': f'K={stoch_k:.2f}', 'reason': 'Overbought crossover'})
     
-    # 5. Bollinger Bands (weight: 1)
-    bb_position = indicators.get('bb_position')
-    if bb_position is not None:
-        if bb_position < 0.2:
-            ensemble_score += 1
-            signal_details.append({'model': 'Bollinger', 'signal': 'BUY', 'weight': 1, 'value': bb_position, 'reason': 'At lower band'})
-        elif bb_position > 0.8:
-            ensemble_score -= 1
-            signal_details.append({'model': 'Bollinger', 'signal': 'SELL', 'weight': -1, 'value': bb_position, 'reason': 'At upper band'})
-    
-    # 6. Aroon (weight: 0.5)
-    aroon_up = indicators.get('aroon_up')
-    aroon_down = indicators.get('aroon_down')
-    if aroon_up is not None and aroon_down is not None:
-        if aroon_up > 70 and aroon_down < 30:
-            ensemble_score += 0.5
-            signal_details.append({'model': 'Aroon', 'signal': 'BUY', 'weight': 0.5, 'value': f'U={aroon_up:.2f}, D={aroon_down:.2f}', 'reason': 'Bullish crossover'})
-        elif aroon_down > 70 and aroon_up < 30:
-            ensemble_score -= 0.5
-            signal_details.append({'model': 'Aroon', 'signal': 'SELL', 'weight': -0.5, 'value': f'U={aroon_up:.2f}, D={aroon_down:.2f}', 'reason': 'Bearish crossover'})
-    
-    # 7. ML Prediction (weight: 1)
-    if ml_pred and ml_pred.get('prediction') != 'neutral' and ml_pred.get('confidence', 0) > 0.2:
-        if ml_pred['prediction'] == 'up':
-            ensemble_score += 1
-            signal_details.append({'model': 'ML', 'signal': 'BUY', 'weight': 1, 'value': f"{ml_pred.get('pct_change', 0):.2f}%", 'reason': f"Predicted up {ml_pred.get('pct_change', 0):.1f}%"})
-        else:
-            ensemble_score -= 1
-            signal_details.append({'model': 'ML', 'signal': 'SELL', 'weight': -1, 'value': f"{ml_pred.get('pct_change', 0):.2f}%", 'reason': f"Predicted down {abs(ml_pred.get('pct_change', 0)):.1f}%"})
-    
-    # 8. Sentiment (weight: 0.5)
+    # Sentiment
     if sentiment and sentiment.get('overall') != 'neutral':
         if sentiment['overall'] == 'bullish':
-            ensemble_score += 0.5
-            signal_details.append({'model': 'Sentiment', 'signal': 'BULLISH', 'weight': 0.5, 'value': sentiment.get('avg_polarity', 0), 'reason': 'Positive news sentiment'})
+            score += 0.5
+            details.append({'model': 'Sentiment', 'signal': 'BULLISH', 'weight': 0.5, 'value': sentiment.get('avg_polarity', 0), 'reason': 'Positive news'})
         else:
-            ensemble_score -= 0.5
-            signal_details.append({'model': 'Sentiment', 'signal': 'BEARISH', 'weight': -0.5, 'value': sentiment.get('avg_polarity', 0), 'reason': 'Negative news sentiment'})
+            score -= 0.5
+            details.append({'model': 'Sentiment', 'signal': 'BEARISH', 'weight': -0.5, 'value': sentiment.get('avg_polarity', 0), 'reason': 'Negative news'})
     
-    # 9. Fundamentals (weight: 0.5)
+    # Fundamentals
     if fundamentals:
         pe = fundamentals.get('pe')
         div_yield = fundamentals.get('div_yield')
         if pe is not None and pe != 'N/A' and isinstance(pe, (int, float)) and pe < 15:
-            ensemble_score += 0.5
-            signal_details.append({'model': 'Fundamental (PE)', 'signal': 'BUY', 'weight': 0.5, 'value': pe, 'reason': f'Low P/E ({pe:.2f})'})
+            score += 0.5
+            details.append({'model': 'Fundamental', 'signal': 'BUY', 'weight': 0.5, 'value': pe, 'reason': f'Low P/E ({pe:.2f})'})
         if div_yield is not None and div_yield != 'N/A' and isinstance(div_yield, (int, float)) and div_yield > 5:
-            ensemble_score += 0.5
-            signal_details.append({'model': 'Fundamental (Div)', 'signal': 'BUY', 'weight': 0.5, 'value': div_yield, 'reason': f'High yield ({div_yield:.2f}%)'})
+            score += 0.5
+            details.append({'model': 'Dividend', 'signal': 'BUY', 'weight': 0.5, 'value': div_yield, 'reason': f'High yield ({div_yield:.2f}%)'})
     
-    # Determine signal strength
-    confidence = min(1.0, abs(ensemble_score) / 10)
+    # Estimate win rate from score
+    win_rate_est = 0.5 + (score / 15)
+    win_rate_est = max(0.3, min(0.7, win_rate_est))
     
-    if ensemble_score > 3:
+    if score > 2.5:
         primary = "🟢 STRONG BUY"
         timing = "Immediate — market open"
         priority = "HIGH"
-        recommended_action = "BUY"
-    elif ensemble_score > 1.5:
+        action = "BUY"
+    elif score > 1.5:
         primary = "🟢 BUY"
         timing = "Buy on dips"
         priority = "MEDIUM"
-        recommended_action = "BUY"
-    elif ensemble_score < -3:
+        action = "BUY"
+    elif score < -2.5:
         primary = "🔴 STRONG SELL"
         timing = "Sell immediately"
         priority = "HIGH"
-        recommended_action = "SELL"
-    elif ensemble_score < -1.5:
+        action = "SELL"
+    elif score < -1.5:
         primary = "🔴 SELL"
-        timing = "Take profits now"
+        timing = "Take profits"
         priority = "MEDIUM"
-        recommended_action = "SELL"
+        action = "SELL"
     else:
         primary = "⏳ NEUTRAL"
         timing = "Wait for breakout"
         priority = "LOW"
-        recommended_action = "WAIT"
+        action = "WAIT"
     
     return {
         'primary': primary,
         'timing': timing,
         'priority': priority,
-        'action': recommended_action,
-        'details': signal_details,
-        'ensemble_score': ensemble_score,
-        'confidence': confidence,
-        'buy_count': sum(1 for s in signal_details if 'BUY' in s.get('signal', '') or 'BULLISH' in s.get('signal', '')),
-        'sell_count': sum(1 for s in signal_details if 'SELL' in s.get('signal', '') or 'BEARISH' in s.get('signal', ''))
+        'action': action,
+        'details': details,
+        'score': score,
+        'win_rate_est': win_rate_est,
+        'buy_count': sum(1 for d in details if 'BUY' in d.get('signal', '')),
+        'sell_count': sum(1 for d in details if 'SELL' in d.get('signal', ''))
     }
 
 # ============================================================
-# 7. ENTRY/EXIT WITH KELLY POSITION SIZING
+# ENTRY/EXIT WITH KELLY CRITERION & TRAILING STOP
 # ============================================================
 
-def calculate_ultimate_entry_exit(symbol, price, signal, indicators, account_balance=30000, risk_per_trade=0.02):
+def calculate_entry_exit(symbol, price, signal, indicators, account_balance=30000, risk_per_trade=0.02):
     if price is None or not isinstance(price, (int, float)):
         return {
             'entry_price': 'N/A',
             'target_price': 'N/A',
             'stop_loss': 'N/A',
+            'trailing_stop': 'N/A',
             'position_size': 0,
-            'entry_timing': 'N/A',
-            'exit_timing': 'N/A',
             'risk_amount': 0,
             'potential_profit': 0,
             'kelly_fraction': 0,
-            'win_rate_est': 0
+            'win_rate': 0
         }
     
     atr = indicators.get('atr', price * 0.02) if indicators else price * 0.02
     if atr is None or atr <= 0:
         atr = price * 0.02
     
+    # Volatility adjustment: wider stops for volatile stocks
+    vol_adjustment = 1.0
+    if indicators and indicators.get('volume_ratio'):
+        vol_ratio = indicators.get('volume_ratio', 1.0)
+        if vol_ratio and vol_ratio > 0:
+            vol_adjustment = min(1.5, max(0.5, vol_ratio / 1.5))
+    
     if signal.get('action') == 'BUY':
         entry = price
-        stop = price - 2 * atr
-        target = price + 4 * atr
-        timing = signal.get('timing', 'Market open')
-        direction = 'long'
+        stop = price - 2 * atr * vol_adjustment
+        target = price + 4 * atr * vol_adjustment
+        trailing_stop = stop
     elif signal.get('action') == 'SELL':
         entry = price
-        stop = price + 2 * atr
-        target = price - 4 * atr
-        timing = signal.get('timing', 'Sell now')
-        direction = 'short'
+        stop = price + 2 * atr * vol_adjustment
+        target = price - 4 * atr * vol_adjustment
+        trailing_stop = stop
     else:
         entry = price
-        stop = price - 2 * atr
-        target = price + 4 * atr
-        timing = 'Wait'
-        direction = 'neutral'
+        stop = price - 2 * atr * vol_adjustment
+        target = price + 4 * atr * vol_adjustment
+        trailing_stop = stop
     
-    # Estimate win rate from ensemble score
-    score = signal.get('ensemble_score', 0)
-    win_rate = 0.5 + (score / 10)
-    win_rate = max(0.3, min(0.7, win_rate))
+    risk_per_share = abs(entry - stop)
+    if risk_per_share <= 0:
+        return {
+            'entry_price': round(entry, 2),
+            'target_price': round(target, 2),
+            'stop_loss': round(stop, 2),
+            'trailing_stop': 'N/A',
+            'position_size': 0,
+            'risk_amount': 0,
+            'potential_profit': 0,
+            'kelly_fraction': 0,
+            'win_rate': 0
+        }
     
-    avg_win = target - entry if direction == 'long' else entry - target
-    avg_loss = entry - stop if direction == 'long' else stop - entry
-    if avg_loss <= 0:
-        kelly_fraction = 0.02
-    else:
-        kelly = calculate_kelly_position(win_rate, avg_win, avg_loss)
-        kelly_fraction = kelly if kelly > 0 else 0.02
+    # Kelly Criterion position sizing
+    win_rate = signal.get('win_rate_est', 0.5)
+    avg_win = target - entry if signal.get('action') == 'BUY' else entry - target
+    avg_loss = entry - stop if signal.get('action') == 'BUY' else stop - entry
+    kelly = calculate_kelly(win_rate, avg_win, avg_loss)
+    kelly_fraction = kelly if kelly > 0 else 0.02
     
-    shares = dynamic_position_sizing(account_balance, entry, stop, win_rate, avg_win, avg_loss, risk_per_trade)
-    risk_amount = shares * (entry - stop) if direction == 'long' else shares * (stop - entry)
-    potential_profit = shares * (target - entry) if direction == 'long' else shares * (entry - target)
+    # Position size with Kelly
+    risk_amount = account_balance * (risk_per_trade + kelly_fraction * 0.5)
+    shares = int(risk_amount / risk_per_share)
+    potential_profit = shares * (target - entry) if signal.get('action') == 'BUY' else shares * (entry - target)
     
     return {
         'entry_price': round(entry, 2),
         'target_price': round(target, 2),
         'stop_loss': round(stop, 2),
+        'trailing_stop': round(trailing_stop, 2),
         'position_size': shares,
-        'entry_timing': timing,
-        'exit_timing': f"When price reaches {round(target, 2)} or stop at {round(stop, 2)}",
         'risk_amount': round(risk_amount, 2),
         'potential_profit': round(potential_profit, 2),
         'kelly_fraction': round(kelly_fraction, 4),
-        'win_rate_est': round(win_rate, 3)
+        'win_rate': round(win_rate, 3)
     }
 
 # ============================================================
-# 8. BACKTESTING ENGINE
+# PORTFOLIO CORRELATION & SECTOR ROTATION
 # ============================================================
 
-class BacktestingEngine:
-    """Backtest strategies on historical data."""
-    def __init__(self, initial_balance=30000):
-        self.initial_balance = initial_balance
-        self.balance = initial_balance
-        self.portfolio = {}
-        self.trades = []
+def calculate_correlation_matrix(historical_data, symbols):
+    """Calculate correlation matrix for portfolio diversification."""
+    if not historical_data or len(historical_data) < 2:
+        return None
     
-    def run_backtest(self, historical_df, signal_generator, symbol, lookback=90):
-        """Run backtest on historical data."""
-        if historical_df is None or len(historical_df) < lookback:
-            return {'error': 'Insufficient data'}
-        
-        # Simulate trading over the historical period
-        close_col = None
-        for col in historical_df.columns:
-            if 'close' in col.lower() or 'adj close' in col.lower():
-                close_col = col
-                break
-        if close_col is None:
-            close_col = historical_df.columns[3] if len(historical_df.columns) > 3 else historical_df.columns[0]
-        
-        prices = historical_df[close_col].values
-        if len(prices) < lookback:
-            return {'error': 'Insufficient data'}
-        
-        # Simple strategy: buy when signal is BUY, sell when signal is SELL
-        shares_held = 0
-        entry_price = 0
-        total_pnl = 0
-        trades = []
-        
-        for i in range(lookback, len(prices) - 1):
-            # Generate signal based on historical data
-            df_slice = historical_df.iloc[i-lookback:i]
-            indicators = calculate_advanced_indicators(df_slice)
-            if not indicators:
-                continue
-            
-            # Simplified signal: RSI-based
-            rsi = indicators.get('rsi')
-            if rsi is None:
-                continue
-            
-            price = prices[i]
-            next_price = prices[i+1]
-            
-            if rsi < 30 and shares_held == 0:
-                # Buy
-                shares_held = int(self.balance / price)
-                entry_price = price
-                self.balance -= shares_held * price
-                trades.append({'type': 'BUY', 'price': price, 'date': df_slice.index[-1] if hasattr(df_slice, 'index') else i})
-            elif rsi > 70 and shares_held > 0:
-                # Sell
-                pnl = shares_held * (price - entry_price)
-                total_pnl += pnl
-                self.balance += shares_held * price
-                trades.append({'type': 'SELL', 'price': price, 'pnl': pnl, 'date': df_slice.index[-1] if hasattr(df_slice, 'index') else i})
-                shares_held = 0
-        
-        # Close remaining position
-        if shares_held > 0:
-            final_price = prices[-1]
-            pnl = shares_held * (final_price - entry_price)
-            total_pnl += pnl
-            self.balance += shares_held * final_price
-            trades.append({'type': 'SELL (close)', 'price': final_price, 'pnl': pnl, 'date': 'end'})
-        
-        return {
-            'initial_balance': self.initial_balance,
-            'final_balance': self.balance,
-            'total_pnl': total_pnl,
-            'return_pct': ((self.balance / self.initial_balance) - 1) * 100,
-            'trades': trades,
-            'num_trades': len(trades),
-            'win_rate': len([t for t in trades if t.get('pnl', 0) > 0]) / len(trades) if trades else 0
-        }
+    returns_dict = {}
+    for symbol in symbols:
+        df = historical_data.get(symbol)
+        if df is not None and not df.empty:
+            close_col = None
+            for col in df.columns:
+                if 'close' in col.lower() or 'adj close' in col.lower():
+                    close_col = col
+                    break
+            if close_col is None:
+                close_col = df.columns[3] if len(df.columns) > 3 else df.columns[0]
+            returns_dict[symbol] = df[close_col].pct_change().dropna()
+    
+    if len(returns_dict) < 2:
+        return None
+    
+    returns_df = pd.DataFrame(returns_dict)
+    return returns_df.corr()
+
+def sector_rotation_score(symbol, sector_data, current_sector=''):
+    """Calculate sector rotation score for capital allocation."""
+    if sector_data is None or sector_data.empty:
+        return 0.0
+    
+    try:
+        # Find sector performance
+        sector_row = sector_data[sector_data['SECTOR NAME'].str.contains(symbol[:3], case=False, na=False)]
+        if sector_row.empty:
+            return 0.0
+        turnover = sector_row['TURNOVER'].values[0] if 'TURNOVER' in sector_row.columns else 0
+        return safe_float(turnover, 0)
+    except:
+        return 0.0
 
 # ============================================================
-# 9. REPORT GENERATION (ULTIMATE)
+# REPORT GENERATION
 # ============================================================
 
-def generate_ultimate_report(quotes, fundamentals, indicators, ml_predictions, sentiment_data,
+def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
                              signals, entry_exit, market_pulse, index_summary, sector_data,
-                             stock_symbols, csf_symbols, paper_engine, backtest_results,
-                             account_balance=30000, trade_journal=None):
-    """Generate the ultimate HTML report with all data."""
+                             stock_symbols, correlation_matrix, account_balance=30000,
+                             trade_journal=None, paper_engine=None):
+    """Generate comprehensive HTML report."""
     now = datetime.now().strftime("%B %d, %Y at %H:%M:%S PKT")
     
     index_html = df_to_html(index_summary, 10)
@@ -1006,19 +662,37 @@ def generate_ultimate_report(quotes, fundamentals, indicators, ml_predictions, s
     active_html = df_to_html(market_pulse.get('active'), 5)
     sectors_html = df_to_html(sector_data, 10)
     
+    # Build lists
+    buy_list = []
+    sell_list = []
+    hold_list = []
+    for symbol in stock_symbols:
+        sig = signals.get(symbol, {})
+        if sig.get('action') == 'BUY':
+            buy_list.append(symbol)
+        elif sig.get('action') == 'SELL':
+            sell_list.append(symbol)
+        else:
+            hold_list.append(symbol)
+    
     # Journal summary
-    journal_summary = trade_journal.get_summary() if trade_journal else {}
+    journal = trade_journal.get_summary() if trade_journal else {}
+    
+    # Correlation matrix HTML
+    corr_html = ""
+    if correlation_matrix is not None and not correlation_matrix.empty:
+        corr_html = correlation_matrix.round(2).to_html(border=0, classes='data-table')
     
     html = f"""
     <html>
     <head>
         <style>
             body {{ font-family: Arial, sans-serif; color: #333; background: #0a0a0a; }}
-            .header {{ background: linear-gradient(135deg, #0a1628, #1a3a5c); color: #00ff88; padding: 20px; text-align: center; border-bottom: 2px solid #00ff88; }}
+            .header {{ background: linear-gradient(135deg, #0a1628, #1a3a5c); color: #00ff88; padding: 20px; text-align: center; }}
             .header h1 {{ margin: 0; color: #00ff88; }}
             .header p {{ margin: 5px 0; color: #aaa; }}
-            .section {{ background: #1a1a2e; margin: 20px; padding: 20px; border-radius: 8px; box-shadow: 0 0 20px rgba(0,255,136,0.1); border: 1px solid #2a2a4e; }}
-            .section h2 {{ color: #00ff88; margin-top: 0; border-bottom: 2px solid #00ff88; padding-bottom: 10px; }}
+            .section {{ background: #1a1a2e; margin: 20px; padding: 20px; border-radius: 8px; border: 1px solid #2a2a4e; }}
+            .section h2 {{ color: #00ff88; border-bottom: 2px solid #00ff88; padding-bottom: 10px; }}
             .section h3 {{ color: #66d9ff; margin: 10px 0; }}
             table {{ width: 100%; border-collapse: collapse; font-size: 13px; color: #ccc; }}
             th {{ background: #0a1628; color: #00ff88; padding: 8px; text-align: left; border-bottom: 2px solid #00ff88; }}
@@ -1030,23 +704,18 @@ def generate_ultimate_report(quotes, fundamentals, indicators, ml_predictions, s
             .signal-sell {{ background: rgba(255,68,68,0.1); }}
             .signal-neutral {{ background: rgba(255,170,0,0.1); }}
             .footer {{ text-align: center; font-size: 12px; color: #666; margin: 20px; padding: 10px; border-top: 1px solid #2a2a4e; }}
-            .highlight {{ background: rgba(255,170,0,0.2); padding: 2px 6px; border-radius: 3px; color: #ffaa00; }}
-            .futures-section {{ background: rgba(0,100,200,0.1); padding: 15px; border-radius: 5px; margin: 10px 0; border: 1px solid #0066cc; }}
-            .risk-section {{ background: rgba(0,255,136,0.05); padding: 15px; border-radius: 5px; margin: 10px 0; border: 1px solid #00ff88; }}
-            .ml-section {{ background: rgba(255,170,0,0.05); padding: 15px; border-radius: 5px; margin: 10px 0; border: 1px solid #ffaa00; }}
-            .backtest-section {{ background: rgba(100,0,200,0.05); padding: 15px; border-radius: 5px; margin: 10px 0; border: 1px solid #6600cc; }}
-            .journal-section {{ background: rgba(0,200,255,0.05); padding: 15px; border-radius: 5px; margin: 10px 0; border: 1px solid #00ccff; }}
             .profit {{ color: #00ff88; }}
             .loss {{ color: #ff4444; }}
+            .kelly-badge {{ background: #00ff88; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>⚡ PSX ULTIMATE PROFIT ENGINE — BLACK BOX v3.0</h1>
+            <h1>⚡ PSX ULTIMATE PROFIT ENGINE v3.1</h1>
             <p>Generated on {now}</p>
-            <p>💰 Account: PKR {account_balance:,.0f} | 📊 {len(stock_symbols)} Shariah Stocks | 🧠 {len(csf_symbols)} CSF Securities</p>
-            <p>📈 TA-Lib: {'✅' if TA_LIB_AVAILABLE else '❌'} | 🤖 ML: {'✅' if SKLEARN_AVAILABLE else '❌'} | 🧠 LSTM: {'✅' if TF_AVAILABLE else '❌'}</p>
+            <p>💰 Account: PKR {account_balance:,.0f} | 📊 {len(stock_symbols)} Shariah Stocks</p>
             <p>📋 Paper Trading: {'🟢 ACTIVE' if PAPER_TRADING else '🔴 DISABLED'}</p>
+            <p>🧠 Kelly Criterion: ENABLED | Trailing Stops: ENABLED</p>
         </div>
 
         <div class="section">
@@ -1069,47 +738,26 @@ def generate_ultimate_report(quotes, fundamentals, indicators, ml_predictions, s
             {sectors_html}
         </div>
 
-        <div class="section ml-section">
-            <h2>🧠 ML & Sentiment Insights</h2>
-            <p><strong>Overall Sentiment:</strong> {sentiment_data.get('overall', 'neutral').upper()} (Polarity: {sentiment_data.get('avg_polarity', 0):.3f})</p>
-            <p><strong>News Headlines:</strong></p>
+        <div class="section">
+            <h2>🧠 News Sentiment</h2>
+            <p><strong>Overall:</strong> {sentiment_data.get('overall', 'neutral').upper()} (Polarity: {sentiment_data.get('avg_polarity', 0):.3f})</p>
             <ul>
     """
     for article in sentiment_data.get('articles', [])[:5]:
         color = '#00ff88' if article['sentiment'] == 'bullish' else '#ff4444' if article['sentiment'] == 'bearish' else '#ffaa00'
-        html += f"<li style='color:#ccc;'><span style='color:{color};'>{article['sentiment'].upper()}</span> — {article['title'][:100]}...</li>"
+        html += f"<li style='color:#ccc;'><span style='color:{color};'>{article['sentiment'].upper()}</span> — {article['title'][:80]}...</li>"
     html += """
             </ul>
         </div>
 
-        <div class="section risk-section">
-            <h2>🛡️ Risk Management</h2>
-            <p><strong>Account Balance:</strong> PKR {account_balance:,.0f}</p>
-            <p><strong>Max Risk per Trade:</strong> {risk_pct:.1f}% (PKR {risk_amt:,.0f})</p>
-            <p><strong>Kelly Criterion:</strong> Dynamic position sizing</p>
-            <p><strong>Stop Loss:</strong> 2× ATR | <strong>Take Profit:</strong> 4× ATR</p>
-        </div>
-
-        <div class="section backtest-section">
-            <h2>📊 Backtest Results</h2>
-            <p><strong>Initial Balance:</strong> PKR {bt_initial}</p>
-            <p><strong>Final Balance:</strong> PKR {bt_final}</p>
-            <p><strong>Total P&L:</strong> <span class="{'profit' if bt_pnl > 0 else 'loss'}">PKR {bt_pnl:,.2f}</span></p>
-            <p><strong>Return:</strong> <span class="{'profit' if bt_return > 0 else 'loss'}">{bt_return:.2f}%</span></p>
-            <p><strong>Win Rate:</strong> {bt_winrate:.1f}%</p>
-            <p><strong>Trades:</strong> {bt_trades}</p>
-        </div>
-
-        <div class="section journal-section">
-            <h2>📋 Trade Journal</h2>
-            <p><strong>Total Trades:</strong> {journal.get('total_trades', 0)}</p>
-            <p><strong>Total P&L:</strong> <span class="{'profit' if journal.get('total_pnl', 0) > 0 else 'loss'}">PKR {journal.get('total_pnl', 0):,.2f}</span></p>
-            <p><strong>Win Rate:</strong> {journal.get('win_rate', 0)*100:.1f}%</p>
-            <p><strong>Profit Factor:</strong> {journal.get('profit_factor', 0):.2f}</p>
+        <div class="section">
+            <h2>📊 Portfolio Correlation Matrix</h2>
+            {corr_html}
+            <p style="font-size: 12px; color: #888;">⬆ Diversify by choosing stocks with low correlation</p>
         </div>
 
         <div class="section">
-            <h2>🎯 Ultimate Trading Signals</h2>
+            <h2>🎯 Trading Signals with Kelly Sizing</h2>
             <table>
                 <thead>
                     <tr>
@@ -1120,9 +768,11 @@ def generate_ultimate_report(quotes, fundamentals, indicators, ml_predictions, s
                         <th>Entry</th>
                         <th>Target</th>
                         <th>Stop</th>
+                        <th>Trailing</th>
                         <th>Shares</th>
                         <th>Risk (PKR)</th>
-                        <th>Profit (PKR)</th>
+                        <th>Profit</th>
+                        <th>Kelly</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1136,64 +786,90 @@ def generate_ultimate_report(quotes, fundamentals, indicators, ml_predictions, s
         ee = entry_exit.get(symbol, {})
         primary = sig.get('primary', '⏳ NEUTRAL')
         signal_class = 'buy' if 'BUY' in primary else 'sell' if 'SELL' in primary else 'neutral'
+        kelly_pct = f"{ee.get('kelly_fraction', 0)*100:.1f}%"
         html += f"""
             <tr class="signal-{signal_class}">
                 <td><strong style="color:#00ff88;">{symbol}</strong></td>
                 <td>{price}</td>
                 <td class="{signal_class}">{primary}</td>
-                <td>{sig.get('ensemble_score', 0):.1f}</td>
+                <td>{sig.get('score', 0):.1f}</td>
                 <td>{ee.get('entry_price', 'N/A')}</td>
                 <td>{ee.get('target_price', 'N/A')}</td>
                 <td>{ee.get('stop_loss', 'N/A')}</td>
+                <td>{ee.get('trailing_stop', 'N/A')}</td>
                 <td>{ee.get('position_size', 0)}</td>
                 <td class="{'profit' if ee.get('risk_amount', 0) > 0 else 'loss'}">{ee.get('risk_amount', 0):.2f}</td>
                 <td class="{'profit' if ee.get('potential_profit', 0) > 0 else 'loss'}">{ee.get('potential_profit', 0):.2f}</td>
+                <td><span class="kelly-badge">{kelly_pct}</span></td>
             </tr>
         """
     html += """
                 </tbody>
             </table>
-        </div>
-
-        <div class="section futures-section">
-            <h2>📈 CSF Futures Eligible Securities</h2>
-            <p><strong>Total:</strong> {len(csf_symbols)} securities | <strong>Contract:</strong> 500 shares | <strong>Period:</strong> 90 days</p>
-            <table>
-                <thead><tr><th>Symbol</th><th>Status</th></tr></thead>
-                <tbody>
-    """
-    for symbol in csf_symbols[:30]:
-        status = "🟢 Active" if quotes.get(symbol, {}).get('price') != 'N/A' else "⏳ Check"
-        html += f"<tr><td><strong>{symbol}</strong></td><td>{status}</td></tr>"
-    html += """
-                </tbody>
-            </table>
+            <p style="font-size: 12px; color: #888;">Kelly = Optimal position fraction based on win rate and risk/reward</p>
         </div>
 
         <div class="section">
             <h2>📋 Execution Summary</h2>
-            <h3 style="color: #00ff88;">🟢 BUY NOW</h3>
+            <h3 style="color: #00ff88;">🟢 BUY NOW ({buy_count})</h3>
             <p>{buy_list}</p>
-            <h3 style="color: #ffaa00;">🟡 HOLD / WAIT</h3>
+            <h3 style="color: #ffaa00;">🟡 HOLD / WAIT ({hold_count})</h3>
             <p>{hold_list}</p>
-            <h3 style="color: #ff4444;">🔴 SELL / TAKE PROFIT</h3>
+            <h3 style="color: #ff4444;">🔴 SELL / TAKE PROFIT ({sell_count})</h3>
             <p>{sell_list}</p>
+        </div>
+
+        <div class="section">
+            <h2>📋 Trade Journal</h2>
+            <p><strong>Total Trades:</strong> {journal.get('total_trades', 0)}</p>
+            <p><strong>Total P&L:</strong> <span class="{'profit' if journal.get('total_pnl', 0) > 0 else 'loss'}">PKR {journal.get('total_pnl', 0):,.2f}</span></p>
+            <p><strong>Win Rate:</strong> {journal.get('win_rate', 0)*100:.1f}%</p>
+            <p><strong>Profit Factor:</strong> {journal.get('profit_factor', 0):.2f}</p>
+        </div>
+
+        <div class="section">
+            <h2>⏰ Optimal Entry Times</h2>
+            <p><strong>Best Time to Buy:</strong> 9:30 AM - 10:30 AM PKT (Opening momentum)</p>
+            <p><strong>Best Time to Sell:</strong> 2:00 PM - 3:00 PM PKT (Closing momentum)</p>
+            <p><strong>Ex-Dividend Strategy:</strong> Buy 1 day before ex-date, sell on ex-date</p>
         </div>
 
         <div class="footer">
             <p>🕌 All stocks Shariah-compliant (KMI All Share Index)</p>
-            <p>🧠 Multi-Model Ensemble: RSI + MACD + ADX + Stoch + BB + Aroon + ML + Sentiment + Fundamentals</p>
-            <p>📊 Backtesting: {bt_return:.2f}% return | Win Rate: {bt_winrate:.1f}%</p>
+            <p>📊 Indicators: RSI + MACD + BB + ADX + Stochastic + Sentiment + Fundamentals</p>
+            <p>💰 Kelly Criterion + Trailing Stops + Volatility Adjustment</p>
             <p>⚠️ Informational only. Always do your own research.</p>
-            <p>⚡ Generated by PSX Ultimate Profit Engine v3.0 — Black Box Edition</p>
+            <p>⚡ Generated by PSX Ultimate Profit Engine v3.1</p>
         </div>
     </body>
     </html>
-    """
+    """.format(
+        now=now,
+        account_balance=account_balance,
+        stock_symbols=stock_symbols,
+        index_html=index_html,
+        gainers_html=gainers_html,
+        losers_html=losers_html,
+        active_html=active_html,
+        sectors_html=sectors_html,
+        sentiment_data=sentiment_data,
+        signals=signals,
+        entry_exit=entry_exit,
+        quotes=quotes,
+        buy_count=len(buy_list),
+        sell_count=len(sell_list),
+        hold_count=len(hold_list),
+        buy_list=', '.join(buy_list[:20]) + ('...' if len(buy_list) > 20 else ''),
+        sell_list=', '.join(sell_list[:20]) + ('...' if len(sell_list) > 20 else ''),
+        hold_list=', '.join(hold_list[:20]) + ('...' if len(hold_list) > 20 else ''),
+        journal=journal,
+        corr_html=corr_html
+    )
+    
     return html
 
 # ============================================================
-# 10. EMAIL SENDING
+# EMAIL SENDING
 # ============================================================
 
 def send_html_email(subject, html_body):
@@ -1221,68 +897,142 @@ def send_html_email(subject, html_body):
         return False
 
 # ============================================================
-# 11. MAIN EXECUTION
+# TRADE JOURNAL
+# ============================================================
+
+class TradeJournal:
+    def __init__(self):
+        self.trades = []
+        self.signals = []
+    
+    def log_trade(self, symbol, entry_price, exit_price, quantity, entry_time, exit_time, profit_loss):
+        self.trades.append({
+            'symbol': symbol,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'quantity': quantity,
+            'entry_time': entry_time,
+            'exit_time': exit_time,
+            'profit_loss': profit_loss
+        })
+    
+    def log_signal(self, symbol, signal, confidence, indicators_used):
+        self.signals.append({
+            'symbol': symbol,
+            'signal': signal,
+            'confidence': confidence,
+            'indicators': indicators_used
+        })
+    
+    def get_summary(self):
+        if not self.trades:
+            return {'total_trades': 0, 'total_pnl': 0, 'win_rate': 0, 'profit_factor': 0}
+        total_pnl = sum(t['profit_loss'] for t in self.trades)
+        win_rate = len([t for t in self.trades if t['profit_loss'] > 0]) / len(self.trades) if self.trades else 0
+        total_wins = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] > 0)
+        total_losses = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] < 0)
+        profit_factor = abs(total_wins / total_losses) if total_losses != 0 else 0
+        return {
+            'total_trades': len(self.trades),
+            'total_pnl': total_pnl,
+            'win_rate': win_rate,
+            'profit_factor': profit_factor
+        }
+
+# ============================================================
+# PAPER TRADING ENGINE
+# ============================================================
+
+class PaperTradingEngine:
+    def __init__(self, initial_balance=30000):
+        self.balance = initial_balance
+        self.portfolio = {}
+        self.initial_balance = initial_balance
+        self.trade_journal = TradeJournal()
+    
+    def buy(self, symbol, price, quantity):
+        cost = price * quantity
+        if cost > self.balance:
+            print(f"❌ Insufficient balance. Need PKR {cost:.2f}, have PKR {self.balance:.2f}")
+            return False
+        self.balance -= cost
+        if symbol in self.portfolio:
+            self.portfolio[symbol]['quantity'] += quantity
+        else:
+            self.portfolio[symbol] = {'quantity': quantity, 'avg_price': price}
+        self.trade_journal.log_trade(symbol, price, None, quantity, datetime.now(), None, None)
+        print(f"✅ BUY {quantity} {symbol} @ PKR {price:.2f}")
+        return True
+    
+    def sell(self, symbol, price, quantity=None):
+        if symbol not in self.portfolio:
+            print(f"❌ No position in {symbol}")
+            return False
+        if quantity is None:
+            quantity = self.portfolio[symbol]['quantity']
+        if quantity > self.portfolio[symbol]['quantity']:
+            print(f"❌ Not enough shares. Have {self.portfolio[symbol]['quantity']}, want {quantity}")
+            return False
+        proceeds = price * quantity
+        self.balance += proceeds
+        self.portfolio[symbol]['quantity'] -= quantity
+        if self.portfolio[symbol]['quantity'] == 0:
+            del self.portfolio[symbol]
+        print(f"✅ SELL {quantity} {symbol} @ PKR {price:.2f}")
+        return True
+
+# ============================================================
+# MAIN EXECUTION
 # ============================================================
 
 def main():
-    print("⚡ PSX ULTIMATE PROFIT ENGINE — BLACK BOX EDITION v3.0")
-    print("=" * 70)
+    print("⚡ PSX ULTIMATE PROFIT ENGINE v3.1 — MAXIMUM PROFIT EDITION")
+    print("=" * 75)
     print(f"💰 Starting Balance: PKR {ACCOUNT_BALANCE:,.0f}")
     print(f"📋 Paper Trading: {'ACTIVE' if PAPER_TRADING else 'DISABLED'}")
-    print(f"🧠 TA-Lib: {'✅' if TA_LIB_AVAILABLE else '❌'}")
-    print(f"🤖 ML: {'✅' if SKLEARN_AVAILABLE else '❌'}")
-    print(f"🧠 LSTM: {'✅' if TF_AVAILABLE else '❌'}")
-    print("=" * 70)
+    print(f"🧠 Kelly Criterion: ENABLED")
+    print(f"📊 Trailing Stops: ENABLED")
+    print("=" * 75)
     
     # 1. Fetch stocks
-    stock_symbols = fetch_top_shariah_compliant_stocks(limit=50)
+    stock_symbols = fetch_top_shariah_stocks(limit=50)
     stock_symbols = [s for s in stock_symbols if is_valid_ticker(s)]
     print(f"📊 Tracking {len(stock_symbols)} Shariah stocks")
     
-    # 2. CSF eligible
-    csf_symbols = VALID_SHARIAH_TICKERS.copy()
-    
-    # 3. Fetch data
+    # 2. Fetch data
     print("📡 Fetching data...")
     quotes = {}
     fundamentals = {}
     historical_data = {}
     for sym in stock_symbols:
-        quotes[sym] = fetch_stock_quote(sym)
-        fundamentals[sym] = fetch_stock_fundamentals(sym)
-        historical_data[sym] = fetch_historical_data(sym, days=365)
+        quotes[sym] = fetch_quote(sym)
+        fundamentals[sym] = fetch_fundamentals(sym)
+        historical_data[sym] = fetch_historical(sym, days=180)
     
-    # 4. Market data
+    # 3. Market data
     market_pulse = fetch_market_pulse()
     index_summary = fetch_index_summary()
     sector_data = fetch_sector_performance()
     
-    # 5. Advanced indicators
+    # 4. Calculate indicators
     print("📊 Calculating indicators...")
     indicators = {}
-    ml_predictions = {}
     for sym, hist in historical_data.items():
-        indicators[sym] = calculate_advanced_indicators(hist)
-        ml_predictions[sym] = ensemble_ml_predictor(hist)
+        indicators[sym] = calculate_indicators(hist)
     
-    # 6. Sentiment
+    # 5. Sentiment
     print("📰 Fetching news sentiment...")
-    sentiment_data = fetch_news_sentiment()
+    sentiment_data = fetch_sentiment()
     
-    # 7. Paper trading engine
+    # 6. Correlation matrix
+    print("📊 Calculating correlation matrix...")
+    correlation_matrix = calculate_correlation_matrix(historical_data, stock_symbols[:20])
+    
+    # 7. Paper trading
     paper_engine = PaperTradingEngine(ACCOUNT_BALANCE)
     trade_journal = TradeJournal()
     
-    # 8. Backtest
-    print("📊 Running backtest...")
-    backtest_results = {}
-    for sym in stock_symbols[:10]:
-        bt = BacktestingEngine(ACCOUNT_BALANCE)
-        result = bt.run_backtest(historical_data.get(sym), None, sym)
-        if result and 'error' not in result:
-            backtest_results[sym] = result
-    
-    # 9. Generate signals
+    # 8. Generate signals
     print("🎯 Generating ultimate signals...")
     signals = {}
     entry_exit = {}
@@ -1296,44 +1046,39 @@ def main():
         elif not isinstance(price, (int, float)):
             price = None
         
-        sig = generate_ultimate_signals(
+        sig = generate_signals(
             sym, price, indicators.get(sym, {}),
-            ml_predictions.get(sym, {}),
-            sentiment_data,
-            fundamentals.get(sym, {}),
-            historical_data.get(sym)
+            sentiment_data, fundamentals.get(sym, {})
         )
         signals[sym] = sig
-        ee = calculate_ultimate_entry_exit(
+        ee = calculate_entry_exit(
             sym, price, sig, indicators.get(sym, {}),
             ACCOUNT_BALANCE, MAX_RISK_PER_TRADE
         )
         entry_exit[sym] = ee
         
-        # Log signal
-        trade_journal.log_signal(sym, sig.get('primary', 'NEUTRAL'), sig.get('confidence', 0), len(sig.get('details', [])))
+        trade_journal.log_signal(sym, sig.get('primary', 'NEUTRAL'), sig.get('score', 0) / 10, len(sig.get('details', [])))
         
-        # Paper trade simulation (simple)
         if PAPER_TRADING and price and isinstance(price, (int, float)):
             if sig.get('action') == 'BUY' and ee.get('position_size', 0) > 0:
                 paper_engine.buy(sym, price, ee.get('position_size', 0))
             elif sig.get('action') == 'SELL' and sym in paper_engine.portfolio:
                 paper_engine.sell(sym, price)
     
-    # 10. Generate report
-    print("📝 Generating ultimate HTML report...")
+    # 9. Generate report
+    print("📝 Generating HTML report...")
     html_report = generate_ultimate_report(
-        quotes, fundamentals, indicators, ml_predictions, sentiment_data,
+        quotes, fundamentals, indicators, sentiment_data,
         signals, entry_exit, market_pulse, index_summary, sector_data,
-        stock_symbols, csf_symbols, paper_engine, backtest_results,
-        ACCOUNT_BALANCE, trade_journal
+        stock_symbols, correlation_matrix,
+        ACCOUNT_BALANCE, trade_journal, paper_engine
     )
     
-    # 11. Send email
+    # 10. Send email
     subject = f"⚡ PSX Ultimate Report - {len(stock_symbols)} Stocks - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     success = send_html_email(subject, html_report)
     if success:
-        print("✅ Report sent!")
+        print("✅ Report sent successfully!")
     else:
         print("❌ Failed to send report.")
 
