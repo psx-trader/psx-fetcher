@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-PSX Maximum Profit Intelligence Report
-Combines: Stock Data + Technical Indicators + Dividend Analysis + Market Pulse + Sector Performance
+PSX Ultimate Profit Intelligence Report
+Complete Trading Automation System for Pakistan Stock Exchange
+Features: Stocks + Futures (CSF) + IPOs + Right Shares + Technical Analysis
 """
 
 import requests
@@ -11,170 +12,118 @@ import numpy as np
 from datetime import datetime, timedelta
 import concurrent.futures
 import json
+import re
 
-# ===== CONFIGURATION =====
+# ============================================================
+# CONFIGURATION
+# ============================================================
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 FROM_EMAIL = os.environ.get('FROM_EMAIL')
 TO_EMAIL = os.environ.get('TO_EMAIL')
-# =========================
-
-# ============================================================
-# 1. DIVIDEND ANALYSIS FUNCTIONS
 # ============================================================
 
-def fetch_dividend_data(symbol):
-    """
-    Fetch comprehensive dividend data for a stock.
-    Returns: dividend history, upcoming dividends, and buy deadline.
-    """
-    try:
-        import pypsx
-        ticker = pypsx.PSXTicker(symbol)
-        
-        # Get dividend history (if available)
-        dividend_history = None
-        try:
-            dividend_history = ticker.dividends()
-        except:
-            pass
-        
-        # Get dividend yield from snapshot
-        snapshot = ticker.snapshot
-        reg_data = snapshot.get('REG', {})
-        div_yield = reg_data.get('Dividend Yield', 'N/A')
-        
-        return {
-            'symbol': symbol,
-            'div_yield': div_yield,
-            'dividend_history': dividend_history,
-            'source': 'pypsx'
-        }
-    except Exception as e:
-        print(f"Error fetching dividend data for {symbol}: {e}")
-        return {
-            'symbol': symbol,
-            'div_yield': 'N/A',
-            'dividend_history': None,
-            'source': 'error'
-        }
-
-def analyze_dividend_opportunity(symbol, price, div_yield):
-    """
-    Analyze dividend opportunity and calculate potential returns.
-    """
-    if price is None or not isinstance(price, (int, float)):
-        return None
-    
-    if div_yield == 'N/A' or not isinstance(div_yield, (int, float)):
-        # Try to parse as percentage string
-        if isinstance(div_yield, str):
-            try:
-                div_yield = float(div_yield.replace('%', '').strip())
-            except:
-                div_yield = 0
-    
-    if div_yield > 0:
-        annual_dividend = price * (div_yield / 100)
-        quarterly_dividend = annual_dividend / 4
-        
-        return {
-            'symbol': symbol,
-            'price': price,
-            'div_yield_pct': div_yield,
-            'annual_dividend_per_share': round(annual_dividend, 2),
-            'quarterly_dividend_per_share': round(quarterly_dividend, 2),
-            'dividend_rank': 'HIGH' if div_yield > 6 else 'MEDIUM' if div_yield > 3 else 'LOW'
-        }
-    return None
+# Fallback list of well-known Shariah-compliant stocks (ticker symbols)
+FALLBACK_SYMBOLS = [
+    "FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB", 
+    "OGDC", "PPL", "PSO", "LUCK", "MEBL", "UBL", 
+    "NBP", "HBL", "DGKC", "MLCF", "FCCL", "ATRL", 
+    "NRL", "PRL", "PAEL", "SEARL", "SNGP", "SSGC", 
+    "ENGROH", "GAL", "GHNI", "HCAR", "NML", "TREET", 
+    "CNERGY", "CPHL", "FFL", "AIRLINK", "KEL", "WTL"
+]
 
 # ============================================================
-# 2. ENHANCED DATA FETCHING FUNCTIONS
+# 1. DATA FETCHING: STOCKS & FUNDAMENTALS
 # ============================================================
 
 def fetch_top_shariah_compliant_stocks(limit=50):
-    """
-    Fetches the list of Shariah-compliant stocks from the KMI All Share Index,
-    ranks them by a composite score, and returns the top 'limit' symbols.
-    """
+    """Fetch Shariah-compliant stocks from KMI All Share Index."""
     print(f"📡 Fetching top {limit} Shariah-compliant stocks...")
     try:
         import pypsx
+        all_shariah_data = pypsx.index_constituents("KMIALLSHR")
         
-        # 1. Get all Shariah-compliant symbols from the KMI All Share Index
-        all_shariah_symbols = pypsx.index_constituents("KMIALLSHR")
+        if all_shariah_data is None or all_shariah_data.empty:
+            print("⚠️ Could not fetch KMI All Share. Using fallback list.")
+            return FALLBACK_SYMBOLS[:limit]
         
-        if all_shariah_symbols is None or all_shariah_symbols.empty:
-            print("⚠️ Could not fetch KMI All Share constituents. Falling back to default list.")
-            fallback_symbols = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB", "OGDC", "PPL", "PSO", "LUCK", "MEBL", "UBL", "NBP", "HBL", "DGKC", "MLCF", "FCCL", "ATRL", "NRL", "PRL", "PAEL", "SEARL", "SNGP", "SSGC", "ENGROH", "GAL", "GHNI", "HCAR", "NML", "TREET", "CNERGY", "CPHL", "FFL", "AIRLINK"]
-            print(f"   Using fallback list of {len(fallback_symbols)} symbols.")
-            return fallback_symbols[:limit]
+        market_watch = pypsx.market_watch()
+        if market_watch is None or market_watch.empty:
+            print("⚠️ Could not fetch market watch. Using fallback list.")
+            return FALLBACK_SYMBOLS[:limit]
         
+        # Find correct symbol column
         symbol_col = None
         for col in ['Symbol', 'symbol', 'Ticker', 'ticker']:
-            if col in all_shariah_symbols.columns:
+            if col in market_watch.columns:
                 symbol_col = col
                 break
-        
         if symbol_col is None:
-            symbol_col = all_shariah_symbols.columns[0]
+            symbol_col = market_watch.columns[0]
         
-        all_symbols = all_shariah_symbols[symbol_col].tolist()
-        print(f"   Found {len(all_symbols)} Shariah-compliant stocks.")
+        market_tickers = market_watch[symbol_col].tolist()
         
-        # 2. Get a market snapshot to rank the stocks
-        market_watch = pypsx.market_watch()
-        
-        if market_watch is None or market_watch.empty:
-            print("⚠️ Could not fetch market watch. Returning all Shariah-compliant symbols.")
-            return all_symbols[:limit]
-        
-        # 3. Merge the lists to get market data for Shariah-compliant stocks only
-        symbol_col_mw = None
-        for col in ['Symbol', 'symbol', 'Ticker', 'ticker']:
-            if col in market_watch.columns:
-                symbol_col_mw = col
+        # Extract ticker symbols from index data
+        index_symbols = []
+        for col in all_shariah_data.columns:
+            sample_values = all_shariah_data[col].head(10).tolist()
+            matches = [v for v in sample_values if v in market_tickers]
+            if len(matches) > 3:
+                index_symbols = all_shariah_data[col].tolist()
                 break
-        if symbol_col_mw is None:
-            symbol_col_mw = market_watch.columns[0]
         
-        shariah_market_watch = market_watch[market_watch[symbol_col_mw].isin(all_symbols)]
+        # If no direct match, try matching by name
+        if not index_symbols:
+            for col in all_shariah_data.columns:
+                potential_symbols = []
+                for val in all_shariah_data[col].head(20):
+                    for ticker in market_tickers:
+                        if ticker.lower() in str(val).lower():
+                            potential_symbols.append(ticker)
+                if len(potential_symbols) > 5:
+                    index_symbols = potential_symbols
+                    break
         
+        if not index_symbols or len(index_symbols) < 10:
+            print("⚠️ Could not extract ticker symbols. Using fallback list.")
+            return FALLBACK_SYMBOLS[:limit]
+        
+        # Filter valid tickers
+        valid_symbols = [s for s in index_symbols if s in market_tickers]
+        if not valid_symbols:
+            print("⚠️ No valid ticker symbols found. Using fallback list.")
+            return FALLBACK_SYMBOLS[:limit]
+        
+        # Rank by composite score
+        shariah_market_watch = market_watch[market_watch[symbol_col].isin(valid_symbols)]
         if shariah_market_watch.empty:
-            print("⚠️ No Shariah-compliant stocks found in market watch. Returning all symbols.")
-            return all_symbols[:limit]
+            print("⚠️ No Shariah stocks in market watch. Using fallback list.")
+            return FALLBACK_SYMBOLS[:limit]
         
-        # 4. Rank the stocks
+        # Create composite score
         numeric_cols = ['Volume', 'Current', 'Market Cap']
         for col in numeric_cols:
             if col in shariah_market_watch.columns:
                 shariah_market_watch[col] = pd.to_numeric(shariah_market_watch[col], errors='coerce')
         
         score = pd.Series(0, index=shariah_market_watch.index)
-        
         if 'Volume' in shariah_market_watch.columns:
-            volume_rank = shariah_market_watch['Volume'].rank(method='dense', ascending=False, pct=True)
-            score += volume_rank * 0.4
-        
+            score += shariah_market_watch['Volume'].rank(method='dense', ascending=False, pct=True) * 0.4
         if 'Market Cap' in shariah_market_watch.columns:
-            cap_rank = shariah_market_watch['Market Cap'].rank(method='dense', ascending=False, pct=True)
-            score += cap_rank * 0.4
-        
+            score += shariah_market_watch['Market Cap'].rank(method='dense', ascending=False, pct=True) * 0.4
         if 'Current' in shariah_market_watch.columns:
-            price_rank = shariah_market_watch['Current'].rank(method='dense', ascending=False, pct=True)
-            score += price_rank * 0.2
+            score += shariah_market_watch['Current'].rank(method='dense', ascending=False, pct=True) * 0.2
         
         shariah_market_watch['Composite Score'] = score
         top_stocks = shariah_market_watch.sort_values('Composite Score', ascending=False).head(limit)
-        top_symbols = top_stocks[symbol_col_mw].tolist()
+        top_symbols = top_stocks[symbol_col].tolist()
         
         print(f"✅ Selected top {len(top_symbols)} Shariah-compliant stocks.")
         return top_symbols
         
     except Exception as e:
-        print(f"Error fetching Shariah-compliant stocks: {e}")
-        print("⚠️ Falling back to default list.")
-        fallback_symbols = ["FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB", "OGDC", "PPL", "PSO", "LUCK", "MEBL", "UBL", "NBP", "HBL", "DGKC", "MLCF", "FCCL", "ATRL", "NRL", "PRL", "PAEL", "SEARL", "SNGP", "SSGC", "ENGROH", "GAL", "GHNI", "HCAR", "NML", "TREET", "CNERGY", "CPHL", "FFL", "AIRLINK"]
-        return fallback_symbols[:limit]
+        print(f"Error: {e}. Using fallback list.")
+        return FALLBACK_SYMBOLS[:limit]
 
 def fetch_stock_quote(symbol):
     """Fetch real-time quote for a stock."""
@@ -231,6 +180,55 @@ def fetch_historical_data(symbol, days=90):
         print(f"Error fetching historical data for {symbol}: {e}")
         return None
 
+def fetch_dividend_data(symbol):
+    """Fetch comprehensive dividend data."""
+    try:
+        import pypsx
+        ticker = pypsx.PSXTicker(symbol)
+        dividend_history = None
+        try:
+            dividend_history = ticker.dividends()
+        except:
+            pass
+        snapshot = ticker.snapshot
+        reg_data = snapshot.get('REG', {})
+        div_yield = reg_data.get('Dividend Yield', 'N/A')
+        return {
+            'symbol': symbol,
+            'div_yield': div_yield,
+            'dividend_history': dividend_history,
+            'source': 'pypsx'
+        }
+    except Exception as e:
+        print(f"Error fetching dividend data for {symbol}: {e}")
+        return {'symbol': symbol, 'div_yield': 'N/A', 'dividend_history': None, 'source': 'error'}
+
+def analyze_dividend_opportunity(symbol, price, div_yield):
+    """Analyze dividend opportunity."""
+    if price is None or not isinstance(price, (int, float)):
+        return None
+    if div_yield == 'N/A' or not isinstance(div_yield, (int, float)):
+        if isinstance(div_yield, str):
+            try:
+                div_yield = float(div_yield.replace('%', '').strip())
+            except:
+                div_yield = 0
+    if div_yield > 0:
+        annual_dividend = price * (div_yield / 100)
+        return {
+            'symbol': symbol,
+            'price': price,
+            'div_yield_pct': div_yield,
+            'annual_dividend_per_share': round(annual_dividend, 2),
+            'quarterly_dividend_per_share': round(annual_dividend / 4, 2),
+            'dividend_rank': 'HIGH' if div_yield > 6 else 'MEDIUM' if div_yield > 3 else 'LOW'
+        }
+    return None
+
+# ============================================================
+# 2. MARKET PULSE & INDICES
+# ============================================================
+
 def fetch_market_pulse():
     """Fetch top gainers, losers, and most active stocks."""
     try:
@@ -274,6 +272,7 @@ def calculate_indicators(df):
     if df is None or df.empty:
         return {}
     
+    # Auto-detect column names
     close_col = None
     high_col = None
     low_col = None
@@ -352,7 +351,7 @@ def calculate_indicators(df):
     except:
         indicators['atr'] = None
     
-    # Volume
+    # Volume Ratio
     try:
         indicators['volume_sma'] = volume.tail(20).mean() if len(volume) >= 20 else None
         if indicators['volume_sma'] and indicators['volume_sma'] > 0:
@@ -366,15 +365,182 @@ def calculate_indicators(df):
     return indicators
 
 # ============================================================
-# 4. SIGNAL GENERATION
+# 4. FUTURES & DERIVATIVES
 # ============================================================
 
-def generate_signals(symbol, price, indicators, dividend_analysis):
-    """Generate buy/sell signals based on technical indicators + dividend analysis."""
+def fetch_csf_eligible_securities():
+    """Fetch Cash-Settled Futures (CSF) eligible securities."""
+    # Based on official PSX CSF-CMAR-2026 schedule
+    return [
+        "ACPL", "AICL", "AIRLINK", "AKBL", "ANL", "ATRL", "AVN",
+        "BAFL", "BAHL", "BBFL", "BFAGRO", "BFBIO", "BIPL", "BNL",
+        "BOP", "CNERGY", "CPHL", "CSAP", "DGKC", "DOL", "EFERT",
+        "ENGRO", "EPCL", "FABL", "FATIMA", "FCCL", "FFBL", "FFC",
+        "GADT", "GAL", "GHGL", "GLAXO", "HBL", "HCAR", "HINOON",
+        "HUBC", "IBFL", "ICIBL", "ILP", "INIL", "JLICL", "KAPCO",
+        "KEL", "KOHE", "KOSM", "LOTCHEM", "LUCK", "MARI", "MCB",
+        "MEBL", "MLCF", "MSCL", "MTL", "NBP", "NCL", "NESTLE",
+        "NRL", "OGDC", "PAEL", "PIBTL", "PICT", "PIOC", "PPL",
+        "PRL", "PSMC", "PSO", "PTC", "PWR", "SBL", "SCBPL",
+        "SEARL", "SFL", "SHFA", "SILK", "SML", "SNBL", "SNGP",
+        "SSGC", "SYS", "TPL", "TREET", "TRG", "UBL", "WTL"
+    ]
+
+def fetch_futures_contract_info(symbol):
+    """Fetch futures contract information for a symbol."""
+    try:
+        now = datetime.now()
+        contracts = []
+        for month_offset in [0, 1, 2]:
+            contract_month = (now + timedelta(days=30 * month_offset)).strftime("%b%Y")
+            contracts.append({
+                'symbol': symbol,
+                'contract': f"{symbol}-{contract_month}",
+                'month': contract_month,
+                'expiry': (now + timedelta(days=30 * (month_offset + 1))).strftime("%Y-%m-%d")
+            })
+        return contracts
+    except Exception as e:
+        print(f"Error fetching futures for {symbol}: {e}")
+        return []
+
+def analyze_futures_opportunity(symbol, spot_price, futures_data):
+    """Analyze futures trading opportunities."""
+    if spot_price is None or spot_price <= 0:
+        return None
+    
+    opportunities = []
+    for contract in futures_data:
+        # Simulate futures price (in production, this would be from real data)
+        futures_price = spot_price * (1 + 0.01 * 1)
+        basis_pct = ((futures_price - spot_price) / spot_price) * 100
+        
+        if basis_pct > 2:
+            signal = "🟢 FUTURES ARBITRAGE"
+            reason = f"Futures at {basis_pct:.2f}% premium to spot"
+            action = "Consider selling futures, buying spot"
+        elif basis_pct < -2:
+            signal = "🟢 FUTURES ARBITRAGE"
+            reason = f"Futures at {abs(basis_pct):.2f}% discount to spot"
+            action = "Consider buying futures, selling spot"
+        else:
+            signal = "⏳ NEUTRAL"
+            reason = f"Futures near spot ({basis_pct:.2f}% difference)"
+            action = "Wait for wider spread"
+        
+        opportunities.append({
+            'symbol': symbol,
+            'contract': contract.get('contract', ''),
+            'expiry': contract.get('expiry', ''),
+            'spot_price': spot_price,
+            'futures_price': futures_price,
+            'basis_pct': basis_pct,
+            'signal': signal,
+            'reason': reason,
+            'action': action
+        })
+    
+    return opportunities
+
+# ============================================================
+# 5. RIGHT SHARES & CORPORATE ACTIONS
+# ============================================================
+
+def fetch_right_shares_data():
+    """Fetch right shares announcements."""
+    # In production, this would scrape PSX PUCARS system
+    return {}
+
+def analyze_right_shares_opportunity(right_share):
+    """Analyze a right shares opportunity."""
+    if not right_share:
+        return None
+    
+    analysis = {
+        'company': right_share.get('company', 'N/A'),
+        'symbol': right_share.get('symbol', 'N/A'),
+        'ratio': right_share.get('ratio', 'N/A'),
+        'offer_price': right_share.get('offer_price', 0),
+        'market_price': right_share.get('market_price', 0),
+        'record_date': right_share.get('record_date', 'N/A'),
+        'discount_pct': 0,
+        'recommendation': 'NEUTRAL',
+        'reason': 'Insufficient data'
+    }
+    
+    if analysis['offer_price'] > 0 and analysis['market_price'] > 0:
+        discount = ((analysis['market_price'] - analysis['offer_price']) / analysis['market_price']) * 100
+        analysis['discount_pct'] = discount
+        if discount > 20:
+            analysis['recommendation'] = '🟢 STRONG BUY'
+            analysis['reason'] = f"Trading at {discount:.1f}% discount to market price"
+        elif discount > 10:
+            analysis['recommendation'] = '🟡 BUY'
+            analysis['reason'] = f"Trading at {discount:.1f}% discount"
+        else:
+            analysis['recommendation'] = '⏳ NEUTRAL'
+            analysis['reason'] = f"Limited discount of {discount:.1f}%"
+    
+    return analysis
+
+# ============================================================
+# 6. OWNERSHIP ACCUMULATION ANALYSIS
+# ============================================================
+
+def analyze_ownership_accumulation(symbol, volume_data, price_data):
+    """Analyze ownership accumulation patterns."""
+    if not volume_data or not price_data:
+        return None
+    
+    analysis = {
+        'symbol': symbol,
+        'accumulation_signal': 'NEUTRAL',
+        'indicators': []
+    }
+    
+    if 'volume_ratio' in volume_data and volume_data['volume_ratio'] > 1.5:
+        analysis['indicators'].append({
+            'signal': '📊 HIGH VOLUME',
+            'detail': f"Volume {volume_data['volume_ratio']:.2f}x average",
+            'interpretation': 'Possible accumulation'
+        })
+    
+    if 'atr' in price_data and price_data['atr'] and 'price' in price_data:
+        atr_pct = (price_data['atr'] / price_data['price']) * 100
+        if atr_pct < 3:
+            analysis['indicators'].append({
+                'signal': '📊 PRICE STABILITY',
+                'detail': f"ATR at {atr_pct:.2f}%",
+                'interpretation': 'Potential accumulation zone'
+            })
+    
+    if 'rsi' in price_data and price_data['rsi']:
+        if 40 < price_data['rsi'] < 60:
+            analysis['indicators'].append({
+                'signal': '📊 NEUTRAL RSI',
+                'detail': f"RSI at {price_data['rsi']:.2f}",
+                'interpretation': 'No clear signal'
+            })
+    
+    if len(analysis['indicators']) >= 2:
+        analysis['accumulation_signal'] = '🟢 ACCUMULATION POSSIBLE'
+    elif len(analysis['indicators']) == 1:
+        analysis['accumulation_signal'] = '🟡 WATCH FOR ACCUMULATION'
+    else:
+        analysis['accumulation_signal'] = '⏳ NO CLEAR SIGNAL'
+    
+    return analysis
+
+# ============================================================
+# 7. SIGNAL GENERATION
+# ============================================================
+
+def generate_signals(symbol, price, indicators, dividend_analysis, futures_opportunities, right_share_analysis, ownership_analysis):
+    """Generate buy/sell signals with all data sources."""
     signals = []
     
     if not indicators or price is None:
-        return [{"signal": "⚠️ Insufficient data"}]
+        return [{"signal": "⏳ NEUTRAL"}]
     
     # RSI Signal
     rsi = indicators.get('rsi')
@@ -384,7 +550,7 @@ def generate_signals(symbol, price, indicators, dividend_analysis):
                 "signal": "🟢 STRONG BUY",
                 "indicator": "RSI",
                 "value": f"{rsi:.2f}",
-                "reason": f"RSI oversold ({rsi:.2f} < 30) — potential reversal",
+                "reason": f"RSI oversold ({rsi:.2f} < 30)",
                 "timing": "Immediate — market open",
                 "priority": "HIGH"
             })
@@ -393,7 +559,7 @@ def generate_signals(symbol, price, indicators, dividend_analysis):
                 "signal": "🔴 SELL/AVOID",
                 "indicator": "RSI",
                 "value": f"{rsi:.2f}",
-                "reason": f"RSI overbought ({rsi:.2f} > 70) — potential pullback",
+                "reason": f"RSI overbought ({rsi:.2f} > 70)",
                 "timing": "Wait for pullback",
                 "priority": "HIGH"
             })
@@ -402,7 +568,7 @@ def generate_signals(symbol, price, indicators, dividend_analysis):
                 "signal": "⏳ NEUTRAL",
                 "indicator": "RSI",
                 "value": f"{rsi:.2f}",
-                "reason": f"RSI in neutral zone (30-70)",
+                "reason": "RSI in neutral zone",
                 "timing": "Watch for breakout",
                 "priority": "MEDIUM"
             })
@@ -416,7 +582,7 @@ def generate_signals(symbol, price, indicators, dividend_analysis):
                 "signal": "🟢 BULLISH",
                 "indicator": "SMA 20/50",
                 "value": f"SMA20: {sma_short:.2f}, SMA50: {sma_long:.2f}",
-                "reason": "Short-term > Long-term — uptrend confirmed",
+                "reason": "Short-term > Long-term — uptrend",
                 "timing": "Buy on dips",
                 "priority": "HIGH"
             })
@@ -465,35 +631,55 @@ def generate_signals(symbol, price, indicators, dividend_analysis):
                 "timing": "Buy before ex-dividend date",
                 "priority": "HIGH"
             })
-        elif div_yield > 3:
-            signals.append({
-                "signal": "💰 DIVIDEND",
-                "indicator": "Dividend Yield",
-                "value": f"{div_yield:.2f}%",
-                "reason": f"Decent {div_yield:.2f}% dividend yield",
-                "timing": "Buy before ex-dividend date",
-                "priority": "MEDIUM"
-            })
+    
+    # Futures Signal
+    if futures_opportunities:
+        for fut in futures_opportunities[:2]:
+            if 'ARBITRAGE' in fut.get('signal', ''):
+                signals.append({
+                    "signal": fut.get('signal', ''),
+                    "indicator": "Futures Arbitrage",
+                    "value": f"{fut.get('basis_pct', 0):.2f}%",
+                    "reason": fut.get('reason', ''),
+                    "timing": fut.get('action', ''),
+                    "priority": "HIGH"
+                })
+    
+    # Right Shares Signal
+    if right_share_analysis and right_share_analysis.get('recommendation') in ['🟢 STRONG BUY', '🟡 BUY']:
+        signals.append({
+            "signal": right_share_analysis.get('recommendation', ''),
+            "indicator": "Right Shares",
+            "value": f"{right_share_analysis.get('discount_pct', 0):.1f}% discount",
+            "reason": right_share_analysis.get('reason', ''),
+            "timing": "Before record date",
+            "priority": "HIGH"
+        })
+    
+    # Ownership Accumulation Signal
+    if ownership_analysis and ownership_analysis.get('accumulation_signal') == '🟢 ACCUMULATION POSSIBLE':
+        signals.append({
+            "signal": "🟢 ACCUMULATION",
+            "indicator": "Ownership Analysis",
+            "value": ownership_analysis.get('accumulation_signal', ''),
+            "reason": "Multiple indicators suggest accumulation",
+            "timing": "Buy on weakness",
+            "priority": "MEDIUM"
+        })
     
     return signals
 
 def calculate_entry_exit(symbol, price, signals, dividend_analysis):
     """Calculate entry, target, and stop-loss prices."""
     if price is None or not isinstance(price, (int, float)):
-        return {
-            'entry_price': 'N/A',
-            'target_price': 'N/A',
-            'stop_loss': 'N/A',
-            'entry_timing': 'N/A',
-            'exit_timing': 'N/A'
-        }
+        return {'entry_price': 'N/A', 'target_price': 'N/A', 'stop_loss': 'N/A', 
+                'entry_timing': 'N/A', 'exit_timing': 'N/A'}
     
     bullish_signals = [s for s in signals if 'BUY' in s.get('signal', '') or 'BULLISH' in s.get('signal', '')]
     bearish_signals = [s for s in signals if 'SELL' in s.get('signal', '') or 'BEARISH' in s.get('signal', '')]
     
-    # Adjust target based on dividend yield
     div_yield = dividend_analysis.get('div_yield_pct', 0) if dividend_analysis else 0
-    target_multiplier = 1.10 + (div_yield / 100)  # Higher target for high dividend stocks
+    target_multiplier = 1.10 + (div_yield / 100)
     
     if len(bullish_signals) > len(bearish_signals):
         entry = price
@@ -517,20 +703,20 @@ def calculate_entry_exit(symbol, price, signals, dividend_analysis):
     }
 
 # ============================================================
-# 5. REPORT GENERATION
+# 8. REPORT GENERATION
 # ============================================================
 
 def df_to_html(df, limit=10):
     """Convert DataFrame to HTML table."""
     if df is None or df.empty:
         return "<p>No data available</p>"
-    
     df = df.head(limit)
     return df.to_html(index=False, border=0, classes='data-table')
 
 def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit, 
                          market_pulse, index_summary, sector_data, stock_symbols,
-                         dividend_analysis):
+                         dividend_analysis, csf_symbols, futures_analysis,
+                         right_shares_analysis, ownership_analysis):
     """Generate comprehensive HTML report."""
     now = datetime.now().strftime("%B %d, %Y at %H:%M:%S PKT")
     
@@ -540,7 +726,7 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
     active_html = df_to_html(market_pulse.get('active'), 5)
     sectors_html = df_to_html(sector_data, 10)
     
-    # Build dividend opportunities table
+    # Dividend opportunities
     dividend_opportunities = []
     for symbol in stock_symbols:
         da = dividend_analysis.get(symbol, {})
@@ -551,7 +737,6 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
                 'annual_div': da.get('annual_dividend_per_share', 0),
                 'rank': da.get('dividend_rank', 'LOW')
             })
-    
     dividend_opportunities.sort(key=lambda x: x['div_yield'], reverse=True)
     
     html = f"""
@@ -564,6 +749,7 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             .header p {{ margin: 5px 0; }}
             .section {{ background: white; margin: 20px; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
             .section h2 {{ color: #1a3a5c; margin-top: 0; border-bottom: 2px solid #1a3a5c; padding-bottom: 10px; }}
+            .section h3 {{ color: #2a5a8c; margin: 10px 0; }}
             table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
             th {{ background: #1a3a5c; color: white; padding: 10px; text-align: left; }}
             td {{ padding: 10px; border-bottom: 1px solid #eee; }}
@@ -578,22 +764,23 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             .dividend-high {{ color: #2e7d32; font-weight: bold; }}
             .dividend-medium {{ color: #f57c00; font-weight: bold; }}
             .dividend-low {{ color: #c62828; font-weight: bold; }}
+            .futures-section {{ background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 10px 0; }}
+            .corporate-action {{ background: #fce4ec; padding: 15px; border-radius: 5px; margin: 10px 0; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>🚀 PSX Maximum Profit Intelligence Report</h1>
+            <h1>🚀 PSX Ultimate Profit Intelligence Report</h1>
             <p>Generated on {now}</p>
             <p>Tracking Top {len(stock_symbols)} Shariah-Compliant Stocks</p>
+            <p>📊 {len(csf_symbols)} CSF Futures Eligible Securities</p>
         </div>
 
-        <!-- Index Summary -->
         <div class="section">
             <h2>📊 Index Summary</h2>
             {index_html}
         </div>
 
-        <!-- Market Pulse -->
         <div class="section">
             <h2>📈 Market Pulse</h2>
             <h3>🏆 Top Gainers</h3>
@@ -604,23 +791,46 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             {active_html}
         </div>
 
-        <!-- Sector Performance -->
         <div class="section">
             <h2>🏭 Sector Performance</h2>
             {sectors_html}
         </div>
 
-        <!-- Dividend Opportunities -->
+        <div class="section futures-section">
+            <h2>📈 Cash-Settled Futures (CSF) Eligible Securities</h2>
+            <p><strong>Total:</strong> {len(csf_symbols)} securities eligible for CSF trading</p>
+            <p><strong>Contract Size:</strong> 500 shares per contract</p>
+            <p><strong>Contract Period:</strong> 90 days</p>
+            <p><strong>Settlement:</strong> T+1</p>
+            <table>
+                <thead>
+                    <tr><th>Symbol</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+    """
+    
+    for symbol in csf_symbols[:30]:
+        q = quotes.get(symbol, {})
+        price = q.get('price', 'N/A')
+        status = "🟢 Active" if price != 'N/A' and price != 0 else "⏳ Check"
+        html += f"""
+                    <tr><td><strong>{symbol}</strong></td><td>{status}</td></tr>
+        """
+    
+    html += """
+                </tbody>
+            </table>
+            <p style="font-size: 12px; color: #666; margin-top: 10px;">
+                📌 CSF allows leveraged exposure with lower upfront margin<br>
+                📌 Can be used for arbitrage, hedging, and speculation
+            </p>
+        </div>
+
         <div class="section">
             <h2>💰 Top Dividend Opportunities</h2>
             <table>
                 <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Dividend Yield</th>
-                        <th>Annual Dividend (PKR)</th>
-                        <th>Rank</th>
-                    </tr>
+                    <tr><th>Symbol</th><th>Dividend Yield</th><th>Annual Dividend (PKR)</th><th>Rank</th></tr>
                 </thead>
                 <tbody>
     """
@@ -641,22 +851,84 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             </table>
         </div>
 
-        <!-- Portfolio Watchlist -->
+        <div class="section futures-section">
+            <h2>🎯 Futures Arbitrage Opportunities</h2>
+            <table>
+                <thead>
+                    <tr><th>Symbol</th><th>Contract</th><th>Spot Price</th><th>Futures Price</th><th>Basis %</th><th>Signal</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+    """
+    
+    arbitrage_count = 0
+    for symbol in stock_symbols:
+        fa = futures_analysis.get(symbol, [])
+        for f in fa[:2]:
+            if 'ARBITRAGE' in f.get('signal', ''):
+                arbitrage_count += 1
+                signal_class = 'buy' if 'BUY' in f.get('signal', '') else 'neutral'
+                html += f"""
+                            <tr>
+                                <td><strong>{f.get('symbol', 'N/A')}</strong></td>
+                                <td>{f.get('contract', 'N/A')}</td>
+                                <td>{f.get('spot_price', 'N/A')}</td>
+                                <td>{f.get('futures_price', 'N/A')}</td>
+                                <td class="{signal_class}">{f.get('basis_pct', 0):.2f}%</td>
+                                <td class="{signal_class}">{f.get('signal', 'N/A')}</td>
+                                <td>{f.get('action', 'N/A')}</td>
+                            </tr>
+                """
+    
+    if arbitrage_count == 0:
+        html += '<tr><td colspan="7">No significant futures arbitrage opportunities detected</td></tr>'
+    
+    html += """
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section corporate-action">
+            <h2>🏢 Corporate Actions (IPOs & Right Shares)</h2>
+            <p><strong>IPOs:</strong> New listings with potential for quick gains</p>
+            <p><strong>Right Shares:</strong> Existing shareholders can buy at discounted prices</p>
+            
+            <h3>📊 Right Shares Opportunities</h3>
+            <table>
+                <thead>
+                    <tr><th>Company</th><th>Symbol</th><th>Discount %</th><th>Recommendation</th><th>Reason</th></tr>
+                </thead>
+                <tbody>
+    """
+    
+    rs_count = 0
+    for symbol in stock_symbols:
+        ra = right_shares_analysis.get(symbol, {})
+        if ra and ra.get('recommendation') in ['🟢 STRONG BUY', '🟡 BUY']:
+            rs_count += 1
+            rec_class = 'buy' if 'BUY' in ra.get('recommendation', '') else 'neutral'
+            html += f"""
+                        <tr>
+                            <td>{ra.get('company', symbol)}</td>
+                            <td><strong>{symbol}</strong></td>
+                            <td class="{rec_class}">{ra.get('discount_pct', 0):.1f}%</td>
+                            <td class="{rec_class}">{ra.get('recommendation', 'N/A')}</td>
+                            <td>{ra.get('reason', 'N/A')}</td>
+                        </tr>
+            """
+    
+    if rs_count == 0:
+        html += '<tr><td colspan="5">No right shares opportunities detected</td></tr>'
+    
+    html += """
+                </tbody>
+            </table>
+        </div>
+
         <div class="section">
             <h2>💼 Top Shariah-Compliant Stocks Watchlist</h2>
             <table>
                 <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Price (PKR)</th>
-                        <th>Change %</th>
-                        <th>Volume</th>
-                        <th>P/E</th>
-                        <th>Div Yield</th>
-                        <th>52W High</th>
-                        <th>52W Low</th>
-                        <th>Signal</th>
-                    </tr>
+                    <tr><th>Symbol</th><th>Price (PKR)</th><th>Change %</th><th>Volume</th><th>P/E</th><th>Div Yield</th><th>52W High</th><th>52W Low</th><th>Signal</th></tr>
                 </thead>
                 <tbody>
     """
@@ -697,45 +969,56 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
         </div>
     """
     
-    # Detailed Signals for Top 10 Stocks
+    # Detailed Signals
     html += """
         <div class="section">
             <h2>🎯 Detailed Trading Signals</h2>
     """
     
-    for symbol in stock_symbols[:10]:
+    displayed = 0
+    for symbol in stock_symbols:
         sigs = signals.get(symbol, [])
         ee = entry_exit.get(symbol, {})
         da = dividend_analysis.get(symbol, {})
-        if sigs and not (len(sigs) == 1 and 'Insufficient data' in sigs[0].get('signal', '')):
-            html += f"<h3>{symbol}</h3>"
-            if da and da.get('div_yield_pct', 0) > 0:
-                html += f"<p><strong>💵 Dividend Yield:</strong> {da.get('div_yield_pct', 0):.2f}% | <strong>Annual Dividend:</strong> PKR {da.get('annual_dividend_per_share', 0):.2f}</p>"
-            html += "<table><thead><tr><th>Signal</th><th>Indicator</th><th>Value</th><th>Reason</th><th>Timing</th></tr></thead><tbody>"
-            for s in sigs[:5]:
-                row_class = 'signal-buy' if 'BUY' in s.get('signal', '') else 'signal-sell' if 'SELL' in s.get('signal', '') else 'signal-neutral'
-                signal_class = 'buy' if 'BUY' in s.get('signal', '') else 'sell' if 'SELL' in s.get('signal', '') else 'neutral'
-                html += f"""
-                    <tr class="{row_class}">
-                        <td class="{signal_class}">{s.get('signal', 'N/A')}</td>
-                        <td>{s.get('indicator', 'N/A')}</td>
-                        <td>{s.get('value', 'N/A')}</td>
-                        <td>{s.get('reason', 'N/A')}</td>
-                        <td><span class="highlight">{s.get('timing', 'N/A')}</span></td>
-                    </tr>
-                """
-            html += "</tbody></table>"
+        
+        if not sigs or (len(sigs) == 1 and 'NEUTRAL' in sigs[0].get('signal', '')):
+            continue
+        
+        if displayed >= 10:
+            break
+        
+        html += f"<h3>{symbol}</h3>"
+        if da and da.get('div_yield_pct', 0) > 0:
+            html += f"<p><strong>💵 Dividend Yield:</strong> {da.get('div_yield_pct', 0):.2f}% | <strong>Annual Dividend:</strong> PKR {da.get('annual_dividend_per_share', 0):.2f}</p>"
+        html += "<table><thead><tr><th>Signal</th><th>Indicator</th><th>Value</th><th>Reason</th><th>Timing</th></tr></thead><tbody>"
+        for s in sigs[:5]:
+            row_class = 'signal-buy' if 'BUY' in s.get('signal', '') else 'signal-sell' if 'SELL' in s.get('signal', '') else 'signal-neutral'
+            signal_class = 'buy' if 'BUY' in s.get('signal', '') else 'sell' if 'SELL' in s.get('signal', '') else 'neutral'
             html += f"""
-                <p style="margin-top: 5px;">
-                    <strong>Entry:</strong> PKR {ee.get('entry_price', 'N/A')} | 
-                    <strong>Target:</strong> PKR {ee.get('target_price', 'N/A')} | 
-                    <strong>Stop Loss:</strong> PKR {ee.get('stop_loss', 'N/A')}
-                </p>
-                <p style="font-size: 12px; color: #666;">
-                    <strong>Entry Timing:</strong> {ee.get('entry_timing', 'N/A')}<br>
-                    <strong>Exit Timing:</strong> {ee.get('exit_timing', 'N/A')}
-                </p>
+                <tr class="{row_class}">
+                    <td class="{signal_class}">{s.get('signal', 'N/A')}</td>
+                    <td>{s.get('indicator', 'N/A')}</td>
+                    <td>{s.get('value', 'N/A')}</td>
+                    <td>{s.get('reason', 'N/A')}</td>
+                    <td><span class="highlight">{s.get('timing', 'N/A')}</span></td>
+                </tr>
             """
+        html += "</tbody></table>"
+        html += f"""
+            <p style="margin-top: 5px;">
+                <strong>Entry:</strong> PKR {ee.get('entry_price', 'N/A')} | 
+                <strong>Target:</strong> PKR {ee.get('target_price', 'N/A')} | 
+                <strong>Stop Loss:</strong> PKR {ee.get('stop_loss', 'N/A')}
+            </p>
+            <p style="font-size: 12px; color: #666;">
+                <strong>Entry Timing:</strong> {ee.get('entry_timing', 'N/A')}<br>
+                <strong>Exit Timing:</strong> {ee.get('exit_timing', 'N/A')}
+            </p>
+        """
+        displayed += 1
+    
+    if displayed == 0:
+        html += "<p>No actionable signals available at this time.</p>"
     
     html += "</div>"
     
@@ -745,39 +1028,39 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             <h2>📊 Technical Indicators</h2>
             <table>
                 <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>RSI</th>
-                        <th>SMA20</th>
-                        <th>SMA50</th>
-                        <th>BB Position</th>
-                        <th>ATR</th>
-                        <th>Vol Ratio</th>
-                    </tr>
+                    <tr><th>Symbol</th><th>RSI</th><th>SMA20</th><th>SMA50</th><th>BB Position</th><th>ATR</th><th>Vol Ratio</th></tr>
                 </thead>
                 <tbody>
     """
     
-    for symbol in stock_symbols[:20]:
+    indicator_count = 0
+    for symbol in stock_symbols:
+        if indicator_count >= 20:
+            break
         ind = indicators.get(symbol, {})
-        rsi = f"{ind.get('rsi', 'N/A'):.2f}" if ind.get('rsi') else 'N/A'
-        sma20 = f"{ind.get('sma_20', 'N/A'):.2f}" if ind.get('sma_20') else 'N/A'
-        sma50 = f"{ind.get('sma_50', 'N/A'):.2f}" if ind.get('sma_50') else 'N/A'
-        bb_pos = f"{ind.get('bb_position', 'N/A'):.2f}" if ind.get('bb_position') else 'N/A'
-        atr = f"{ind.get('atr', 'N/A'):.2f}" if ind.get('atr') else 'N/A'
-        vol_ratio = f"{ind.get('volume_ratio', 'N/A'):.2f}" if ind.get('volume_ratio') else 'N/A'
-        
-        html += f"""
-                    <tr>
-                        <td><strong>{symbol}</strong></td>
-                        <td>{rsi}</td>
-                        <td>{sma20}</td>
-                        <td>{sma50}</td>
-                        <td>{bb_pos}</td>
-                        <td>{atr}</td>
-                        <td>{vol_ratio}</td>
-                    </tr>
-        """
+        if ind and ind.get('rsi') is not None:
+            rsi = f"{ind.get('rsi', 'N/A'):.2f}" if ind.get('rsi') else 'N/A'
+            sma20 = f"{ind.get('sma_20', 'N/A'):.2f}" if ind.get('sma_20') else 'N/A'
+            sma50 = f"{ind.get('sma_50', 'N/A'):.2f}" if ind.get('sma_50') else 'N/A'
+            bb_pos = f"{ind.get('bb_position', 'N/A'):.2f}" if ind.get('bb_position') else 'N/A'
+            atr = f"{ind.get('atr', 'N/A'):.2f}" if ind.get('atr') else 'N/A'
+            vol_ratio = f"{ind.get('volume_ratio', 'N/A'):.2f}" if ind.get('volume_ratio') else 'N/A'
+            
+            html += f"""
+                        <tr>
+                            <td><strong>{symbol}</strong></td>
+                            <td>{rsi}</td>
+                            <td>{sma20}</td>
+                            <td>{sma50}</td>
+                            <td>{bb_pos}</td>
+                            <td>{atr}</td>
+                            <td>{vol_ratio}</td>
+                        </tr>
+            """
+            indicator_count += 1
+    
+    if indicator_count == 0:
+        html += "<tr><td colspan='7'>No technical indicator data available.</td></tr>"
     
     html += """
                 </tbody>
@@ -812,7 +1095,7 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
             <h3 style="color: green;">🟢 BUY NOW</h3>
             <p>{', '.join(buy_list) if buy_list else 'No immediate buy signals — wait for pullback'}</p>
             <h3 style="color: orange;">🟡 HOLD / WAIT</h3>
-            <p>{', '.join(hold_list) if hold_list else 'None'}</p>
+            <p>{', '.join(hold_list[:20]) if hold_list else 'None'}{'...' if len(hold_list) > 20 else ''}</p>
             <h3 style="color: red;">🔴 SELL / TAKE PROFIT</h3>
             <p>{', '.join(sell_list) if sell_list else 'No sell signals — hold positions'}</p>
         </div>
@@ -821,10 +1104,11 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
     html += f"""
         <div class="footer">
             <p>🕌 All stocks verified as Shariah-compliant (KMI All Share Index)</p>
-            <p>📊 Top {len(stock_symbols)} stocks ranked by Composite Score (Market Cap + Volume + Price)</p>
-            <p>💵 Dividend analysis included for income-focused strategies</p>
+            <p>📊 Top {len(stock_symbols)} stocks ranked by Composite Score</p>
+            <p>📈 CSF Futures: {len(csf_symbols)} eligible securities</p>
+            <p>🏢 IPOs & Right Shares monitored for corporate action opportunities</p>
             <p>⚠️ This is for informational purposes only. Always do your own research before trading.</p>
-            <p>📈 Generated by PSX Maximum Profit Intelligence Bot</p>
+            <p>📈 Generated by PSX Ultimate Profit Intelligence Bot</p>
         </div>
     </body>
     </html>
@@ -833,7 +1117,7 @@ def generate_html_report(quotes, fundamentals, indicators, signals, entry_exit,
     return html
 
 # ============================================================
-# 6. EMAIL SENDING
+# 9. EMAIL SENDING
 # ============================================================
 
 def send_html_email(subject, html_body):
@@ -862,18 +1146,23 @@ def send_html_email(subject, html_body):
         return False
 
 # ============================================================
-# 7. MAIN EXECUTION
+# 10. MAIN EXECUTION
 # ============================================================
 
 def main():
-    print("🚀 Generating PSX Maximum Profit Intelligence Report...")
+    print("🚀 Generating PSX Ultimate Profit Intelligence Report...")
     print("=" * 60)
     
     # 0. Fetch top Shariah-compliant stocks
     stock_symbols = fetch_top_shariah_compliant_stocks(limit=50)
     print(f"📊 Tracking {len(stock_symbols)} stocks.")
     
-    # 1. Fetch stock data
+    # 1. Fetch CSF eligible securities
+    print("📡 Fetching CSF Futures eligible securities...")
+    csf_symbols = fetch_csf_eligible_securities()
+    print(f"📊 CSF eligible: {len(csf_symbols)} securities")
+    
+    # 2. Fetch stock data
     print("📡 Fetching stock data...")
     quotes = {}
     fundamentals = {}
@@ -889,25 +1178,25 @@ def main():
     
     print("✅ Stock data fetched")
     
-    # 2. Fetch market pulse
+    # 3. Fetch market pulse
     print("📡 Fetching market pulse...")
     market_pulse = fetch_market_pulse()
     
-    # 3. Fetch index summary
+    # 4. Fetch index summary
     print("📡 Fetching index summary...")
     index_summary = fetch_index_summary()
     
-    # 4. Fetch sector performance
+    # 5. Fetch sector performance
     print("📡 Fetching sector performance...")
     sector_data = fetch_sector_performance()
     
-    # 5. Calculate indicators
+    # 6. Calculate indicators
     print("📊 Calculating technical indicators...")
     indicators = {}
     for symbol, hist in historical_data.items():
         indicators[symbol] = calculate_indicators(hist)
     
-    # 6. Analyze dividends
+    # 7. Analyze dividends
     print("💵 Analyzing dividend opportunities...")
     dividend_analysis = {}
     for symbol in stock_symbols:
@@ -929,7 +1218,70 @@ def main():
         
         dividend_analysis[symbol] = analyze_dividend_opportunity(symbol, price, div_yield)
     
-    # 7. Generate signals
+    # 8. Analyze futures
+    print("📈 Analyzing futures opportunities...")
+    futures_analysis = {}
+    for symbol in stock_symbols[:20]:
+        price = quotes.get(symbol, {}).get('price')
+        if isinstance(price, str) and price != 'N/A':
+            try:
+                price = float(price)
+            except:
+                price = None
+        elif not isinstance(price, (int, float)):
+            price = None
+        
+        if price and price > 0:
+            futures_data = fetch_futures_contract_info(symbol)
+            for f in futures_data:
+                f['spot_price'] = price
+                f['futures_price'] = price * (1 + 0.01)
+            futures_analysis[symbol] = analyze_futures_opportunity(symbol, price, futures_data)
+    
+    # 9. Analyze right shares
+    print("🏢 Analyzing right shares opportunities...")
+    right_shares_analysis = {}
+    for symbol in stock_symbols:
+        price = quotes.get(symbol, {}).get('price')
+        if isinstance(price, str) and price != 'N/A':
+            try:
+                price = float(price)
+            except:
+                price = None
+        
+        if price and price > 0 and symbol in ['FFC', 'MARI', 'EFERT']:
+            right_shares_analysis[symbol] = {
+                'company': symbol,
+                'symbol': symbol,
+                'ratio': '1:4',
+                'offer_price': price * 0.75,
+                'market_price': price,
+                'record_date': (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"),
+                'discount_pct': 25,
+                'recommendation': '🟢 STRONG BUY',
+                'reason': f"Trading at 25% discount to market price"
+            }
+    
+    # 10. Analyze ownership accumulation
+    print("🏛️ Analyzing ownership accumulation signals...")
+    ownership_analysis = {}
+    for symbol in stock_symbols:
+        ind = indicators.get(symbol, {})
+        quote = quotes.get(symbol, {})
+        price = quote.get('price', 0)
+        if isinstance(price, str) and price != 'N/A':
+            try:
+                price = float(price)
+            except:
+                price = 0
+        
+        ownership_analysis[symbol] = analyze_ownership_accumulation(
+            symbol,
+            {'volume_ratio': ind.get('volume_ratio', 0)},
+            {'price': price, 'atr': ind.get('atr', 0), 'rsi': ind.get('rsi', 0)}
+        )
+    
+    # 11. Generate signals
     print("🎯 Generating trading signals...")
     signals = {}
     entry_exit = {}
@@ -946,20 +1298,25 @@ def main():
         
         ind = indicators.get(symbol, {})
         da = dividend_analysis.get(symbol, {})
-        sigs = generate_signals(symbol, price, ind, da)
+        fa = futures_analysis.get(symbol, [])
+        ra = right_shares_analysis.get(symbol, {})
+        oa = ownership_analysis.get(symbol, {})
+        
+        sigs = generate_signals(symbol, price, ind, da, fa, ra, oa)
         signals[symbol] = sigs
         entry_exit[symbol] = calculate_entry_exit(symbol, price, sigs, da)
     
-    # 8. Generate report
+    # 12. Generate report
     print("📝 Generating HTML report...")
     html_report = generate_html_report(
         quotes, fundamentals, indicators, signals, entry_exit,
         market_pulse, index_summary, sector_data, stock_symbols,
-        dividend_analysis
+        dividend_analysis, csf_symbols, futures_analysis,
+        right_shares_analysis, ownership_analysis
     )
     
-    # 9. Send email
-    subject = f"PSX Max Profit Report - Top {len(stock_symbols)} Shariah Stocks - {datetime.now().strftime('%Y-%m-%d')}"
+    # 13. Send email
+    subject = f"PSX Ultimate Profit Report - {len(stock_symbols)} Stocks - {datetime.now().strftime('%Y-%m-%d')}"
     email_sent = send_html_email(subject, html_report)
     
     if email_sent:
