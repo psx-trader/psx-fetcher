@@ -1,12 +1,13 @@
+```python
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.2 - THE COMPLETE 3000+ LINE SYSTEM
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 - LIGHT THEME
 Author: PSX Ultimate Engine
 License: Personal Use Only
 Description: Fully automated Shariah-compliant dividend capture and swing trading system for PSX.
 Features: Live data, 30+ indicators, ML ensemble (LR+RF+XGB+LSTM), sentiment analysis (VADER+TextBlob),
           Kelly sizing, paper trading, backtesting, portfolio optimization, correlation analysis,
-          risk management, telegram alerts, HTML email reports with embedded charts,
+          risk management, telegram alerts, HTML email reports with light theme charts,
           YAML config, SQLite trade journal, scenario testing, walk-forward analysis, and full logging.
 Now includes psx-data-reader integration for historical data.
 """
@@ -48,7 +49,7 @@ import matplotlib
 matplotlib.use('Agg')  # non-interactive
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import seaborn as sns
+# import seaborn as sns  # Not needed – removed to avoid dependency
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -77,7 +78,7 @@ except ImportError:
 # ============================================================
 # VERSION & METADATA
 # ============================================================
-VERSION = "21.2"
+VERSION = "21.3"
 AUTHOR = "PSX Ultimate Dividend Capture Engine"
 DESCRIPTION = "Complete Automated Dividend Capture System for PSX with Top 50 Shariah Stocks"
 RELEASE_DATE = "June 24, 2026"
@@ -978,7 +979,6 @@ class PSXDataReaderHistFetcher:
             df = psx_hist_stocks(symbol, start=start_date, end=end_date)
             if df is not None and not df.empty:
                 # Ensure column names are standardized: Open, High, Low, Close, Volume
-                # The psx package returns columns: 'Open', 'High', 'Low', 'Close', 'Volume'
                 return df
         except Exception as e:
             logger.warning(f"psx-data-reader error for {symbol}: {e}")
@@ -2075,7 +2075,7 @@ def send_email(subject: str, html_content: str) -> bool:
         return False
 
 # ============================================================
-# HTML REPORT GENERATOR (WITH CHARTS)
+# HTML REPORT GENERATOR (LIGHT THEME)
 # ============================================================
 def generate_chart_base64(fig):
     buf = BytesIO()
@@ -2095,11 +2095,13 @@ def generate_performance_chart(paper_engine: PaperTradingEngine) -> str:
     if not pnl_series:
         return ""
     fig, ax = plt.subplots(figsize=(8, 3))
-    ax.plot(pnl_series, color='#00ff88', lw=1)
-    ax.set_title('Equity Curve', color='white')
-    ax.set_facecolor('#0a1628')
-    fig.patch.set_facecolor('#0a1628')
-    ax.tick_params(colors='white')
+    ax.plot(pnl_series, color='#0066cc', lw=1)
+    ax.set_title('Equity Curve', color='#222')
+    ax.set_facecolor('#ffffff')
+    fig.patch.set_facecolor('#ffffff')
+    ax.tick_params(colors='#555')
+    ax.spines['bottom'].set_color('#ccc')
+    ax.spines['left'].set_color('#ccc')
     return generate_chart_base64(fig)
 
 def generate_sentiment_chart(sentiment_data: Dict) -> str:
@@ -2107,11 +2109,14 @@ def generate_sentiment_chart(sentiment_data: Dict) -> str:
         return ""
     polarities = [a['polarity'] for a in sentiment_data['articles'][:20]]
     fig, ax = plt.subplots(figsize=(6, 2))
-    ax.bar(range(len(polarities)), polarities, color=['#00ff88' if p>0 else '#ff4444' for p in polarities])
-    ax.set_title('News Sentiment Polarity', color='white')
-    ax.set_facecolor('#0a1628')
-    fig.patch.set_facecolor('#0a1628')
-    ax.tick_params(colors='white')
+    colors = ['#28a745' if p>0 else '#dc3545' for p in polarities]
+    ax.bar(range(len(polarities)), polarities, color=colors)
+    ax.set_title('News Sentiment Polarity', color='#222')
+    ax.set_facecolor('#ffffff')
+    fig.patch.set_facecolor('#ffffff')
+    ax.tick_params(colors='#555')
+    ax.spines['bottom'].set_color('#ccc')
+    ax.spines['left'].set_color('#ccc')
     return generate_chart_base64(fig)
 
 def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
@@ -2137,7 +2142,7 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
             <td>T-{max(0, (datetime.strptime(s.entry_date, '%Y-%m-%d') - datetime.now()).days)}</td>
             <td>{s.entry_date}</td>
             <td>{s.dividend_amount:.2f}</td>
-            <td class='buy'>{s.dividend_yield:.2f}%</td>
+            <td class='positive'>{s.dividend_yield:.2f}%</td>
             <td>{s.stop_loss:.2f}</td>
             <td>{s.target1:.2f}</td>
             <td>{s.target2:.2f}</td>
@@ -2151,7 +2156,7 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
             <td>{s.risk_reward:.2f}</td>
             <td>{s.confidence_score:.1%}</td>
             <td><span class='priority'>{priority_badge}</span></td>
-            <td class='buy'>🟢 BUY</td>
+            <td class='positive'>🟢 BUY</td>
         </tr>"""
     if not sig_rows:
         sig_rows = "<tr><td colspan='20'>No qualifying signals</td></tr>"
@@ -2159,9 +2164,9 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
     gainers = losers = active = "<li>No data</li>"
     if market_pulse:
         if market_pulse.get('gainers') is not None and not market_pulse['gainers'].empty:
-            gainers = "".join([f"<li>{row.get('Symbol', 'N/A')}: {row.get('CHANGE %', 0):+.2f}%</li>" for _, row in market_pulse['gainers'].head(5).iterrows()])
+            gainers = "".join([f"<li>{row.get('Symbol', 'N/A')}: <span class='positive'>{row.get('CHANGE %', 0):+.2f}%</span></li>" for _, row in market_pulse['gainers'].head(5).iterrows()])
         if market_pulse.get('losers') is not None and not market_pulse['losers'].empty:
-            losers = "".join([f"<li>{row.get('Symbol', 'N/A')}: {row.get('CHANGE %', 0):+.2f}%</li>" for _, row in market_pulse['losers'].head(5).iterrows()])
+            losers = "".join([f"<li>{row.get('Symbol', 'N/A')}: <span class='negative'>{row.get('CHANGE %', 0):+.2f}%</span></li>" for _, row in market_pulse['losers'].head(5).iterrows()])
         if market_pulse.get('active') is not None and not market_pulse['active'].empty:
             active = "".join([f"<li>{row.get('Symbol', 'N/A')}: {row.get('Volume', 0):,}</li>" for _, row in market_pulse['active'].head(5).iterrows()])
     
@@ -2184,7 +2189,7 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
     port_value = paper_engine.get_total_value(live_prices)
     
     sentiment_text = sentiment_data.get('overall', 'neutral').upper()
-    sentiment_color = '#00ff88' if sentiment_text == 'BULLISH' else '#ff4444' if sentiment_text == 'BEARISH' else '#ffaa00'
+    sentiment_color = '#28a745' if sentiment_text == 'BULLISH' else '#dc3545' if sentiment_text == 'BEARISH' else '#ffc107'
     
     perf_chart = generate_performance_chart(paper_engine)
     sent_chart = generate_sentiment_chart(sentiment_data)
@@ -2192,31 +2197,33 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
     html = f"""
     <html><head>
     <style>
-        body {{ font-family: Arial, sans-serif; background: #0a0a0a; color: #ccc; padding: 20px; }}
-        .header {{ background: #1a3a5c; color: #00ff88; padding: 20px; text-align: center; border-radius: 8px; }}
-        .section {{ background: #1a1a2e; margin: 20px 0; padding: 20px; border-radius: 8px; border: 1px solid #2a2a4e; }}
-        .section h2 {{ color: #00ff88; border-bottom: 2px solid #00ff88; padding-bottom: 10px; }}
-        table {{ width: 100%; border-collapse: collapse; font-size: 11px; }}
-        th {{ background: #0a1628; color: #00ff88; padding: 8px; text-align: left; border-bottom: 2px solid #00ff88; }}
-        td {{ padding: 6px; border-bottom: 1px solid #2a2a4e; }}
-        .buy {{ color: #00ff88; font-weight: bold; }}
-        .sell {{ color: #ff4444; font-weight: bold; }}
-        .priority {{ background: #ffaa00; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; font-size: 10px; }}
-        .footer {{ text-align: center; font-size: 12px; color: #666; margin-top: 20px; border-top: 1px solid #2a2a4e; padding-top: 10px; }}
+        body {{ font-family: Arial, sans-serif; background: #f5f5f5; color: #222; padding: 20px; }}
+        .header {{ background: #ffffff; border-left: 5px solid #0066cc; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .header h1 {{ color: #0066cc; margin: 0; }}
+        .section {{ background: #ffffff; margin: 20px 0; padding: 20px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+        .section h2 {{ color: #0066cc; border-bottom: 2px solid #e0e0e0; padding-bottom: 8px; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }}
+        th {{ background: #eef3f9; color: #333; padding: 10px 8px; text-align: left; border-bottom: 2px solid #ddd; }}
+        td {{ padding: 8px; border-bottom: 1px solid #eee; }}
+        tr:nth-child(even) {{ background: #fafafa; }}
+        .positive {{ color: #28a745; font-weight: bold; }}
+        .negative {{ color: #dc3545; font-weight: bold; }}
+        .priority {{ background: #ffc107; color: #222; padding: 2px 8px; border-radius: 12px; font-size: 10px; }}
+        .footer {{ text-align: center; font-size: 12px; color: #888; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 15px; }}
         ul {{ list-style: none; padding: 0; }}
         li {{ margin: 5px 0; }}
-        .data-table th {{ background: #1a3a5c; color: #fff; }}
-        .data-table td {{ padding: 5px; border: 1px solid #2a2a4e; }}
+        .data-table th {{ background: #eef3f9; }}
+        .data-table td {{ padding: 5px; border: 1px solid #eee; }}
         .chart-container {{ text-align: center; margin: 10px 0; }}
     </style>
     </head><body>
         <div class="header">
-            <h1>💰 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.2</h1>
-            <p>Generated on {now}</p>
+            <h1>💰 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3</h1>
+            <p style="color:#666;">Generated on {now}</p>
             <p>💰 Account: PKR {ACCOUNT_BALANCE:,.0f} | 📊 {len(dividends)} Upcoming Dividends | 🕌 {len(symbols)} Shariah Stocks</p>
             <p>📈 Projected Monthly: {sum(s.dividend_yield for s in signals)/len(signals) if signals else 0:.2f}% | Annual: {sum(s.dividend_yield for s in signals)/len(signals)*12 if signals else 0:.2f}%</p>
             <p>📋 Trades: {total_trades} | P&L: {total_pnl:+.2f} | Win Rate: {win_rate:.1f}% | Max DD: {journal.get('max_dd',0)*100:.2f}%</p>
-            <p>📊 Sentiment: <span style='color:{sentiment_color};'>{sentiment_text}</span></p>
+            <p>📊 Sentiment: <span style='color:{sentiment_color}; font-weight:bold;'>{sentiment_text}</span></p>
         </div>
         <div class="section">
             <h2>📅 Upcoming Dividend Calendar</h2>
@@ -2260,7 +2267,7 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
             {corr_html}
         </div>
         <div class="footer">
-            <p>🕌 Shariah-compliant | 📊 Data sourced from PSX website, pypsx, psx-data-reader & multiple APIs | ⚡ Generated by PSX Ultimate Engine v21.2</p>
+            <p>🕌 Shariah-compliant | 📊 Data sourced from PSX website, pypsx, psx-data-reader & multiple APIs | ⚡ Generated by PSX Ultimate Engine v21.3</p>
             <p>⚠️ This is for informational purposes only. Always do your own research.</p>
         </div>
     </body></html>
@@ -2304,7 +2311,7 @@ def walk_forward_optimization(symbol, historical_data, ex_dates, window_days=90,
 # MAIN EXECUTION
 # ============================================================
 def main():
-    parser = argparse.ArgumentParser(description='PSX Ultimate Dividend Capture Engine v21.2')
+    parser = argparse.ArgumentParser(description='PSX Ultimate Dividend Capture Engine v21.3')
     parser.add_argument('--mode', choices=['live', 'backtest', 'report', 'scenario', 'walkforward'], default='live',
                         help='Operation mode')
     parser.add_argument('--config', default='config.yaml', help='Path to config file')
@@ -2312,7 +2319,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 80)
-    print("💰 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.2 - THE COMPLETE 3000+ LINE SYSTEM")
+    print("💰 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 - LIGHT THEME")
     print("=" * 80)
     
     config = Config(args.config)
@@ -2505,3 +2512,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+```
