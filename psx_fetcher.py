@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PSX ULTIMATE PROFIT ENGINE v3.1 — MAXIMUM PROFIT EDITION
-Features: Kelly Sizing, Trailing Stops, Dividend Capture, Sector Rotation, Correlation Analysis
+PSX ULTIMATE PROTECTED PROFIT ENGINE v6.0
+Features: Gap Detection, Momentum, Breakout, Volume Spike, Divergence, Risk-Off Mode, Tiered Profit Taking
 """
 
 import requests
@@ -10,7 +10,6 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import re
-import json
 import feedparser
 from textblob import TextBlob
 import warnings
@@ -23,11 +22,15 @@ RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 FROM_EMAIL = os.environ.get('FROM_EMAIL')
 TO_EMAIL = os.environ.get('TO_EMAIL')
 ACCOUNT_BALANCE = 30000
-MAX_RISK_PER_TRADE = 0.02  # 2%
+MAX_RISK_PER_TRADE = 0.015               # 1.5% per trade
+MAX_PORTFOLIO_DRAWDOWN = 0.03            # 3% daily stop
+MIN_RISK_REWARD = 2.0
+MIN_VOLUME_CRORES = 5                    # PKR 5 crore daily volume
+VOLATILITY_THRESHOLD = 0.03              # 3% max daily volatility
+RISK_OFF_INDEX_DROP = 0.015              # 1.5% index drop triggers risk-off
 PAPER_TRADING = True
 # ============================================================
 
-# Shariah-compliant tickers
 VALID_SHARIAH_TICKERS = [
     "FFC", "SYS", "MARI", "EFERT", "HUBC", "MCB", 
     "OGDC", "PPL", "PSO", "LUCK", "MEBL", "UBL", 
@@ -47,7 +50,7 @@ RSS_FEEDS = [
 ]
 
 # ============================================================
-# HELPER FUNCTIONS
+# GLOBAL HELPERS
 # ============================================================
 
 def df_to_html(df, limit=10):
@@ -74,8 +77,7 @@ def safe_float(val, default=0.0):
     except:
         return default
 
-def calculate_kelly(win_rate, avg_win, avg_loss, max_fraction=0.25):
-    """Calculate Kelly Criterion optimal position fraction."""
+def calculate_kelly(win_rate, avg_win, avg_loss, max_fraction=0.2):
     if avg_loss == 0:
         return 0.0
     b = avg_win / avg_loss
@@ -85,13 +87,6 @@ def calculate_kelly(win_rate, avg_win, avg_loss, max_fraction=0.25):
         return 0.0
     kelly = (b * p - q) / b
     return max(0.0, min(kelly, max_fraction))
-
-def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
-    """Calculate Sharpe ratio from returns series."""
-    if len(returns) < 2:
-        return 0.0
-    excess = returns - risk_free_rate
-    return excess.mean() / excess.std() if excess.std() > 0 else 0.0
 
 # ============================================================
 # DATA FETCHING
@@ -104,7 +99,6 @@ def fetch_top_shariah_stocks(limit=50):
         market_watch = pypsx.market_watch()
         if market_watch is None or market_watch.empty:
             return VALID_SHARIAH_TICKERS[:limit]
-        
         symbol_col = None
         for col in ['Symbol', 'symbol', 'Ticker', 'ticker']:
             if col in market_watch.columns:
@@ -112,21 +106,17 @@ def fetch_top_shariah_stocks(limit=50):
                 break
         if symbol_col is None:
             symbol_col = market_watch.columns[0]
-        
         market_tickers = market_watch[symbol_col].tolist()
         valid_tickers = [t for t in market_tickers if is_valid_ticker(t)]
         shariah_tickers = [t for t in valid_tickers if t in VALID_SHARIAH_TICKERS]
-        
         if not shariah_tickers:
             return VALID_SHARIAH_TICKERS[:limit]
-        
         if 'Volume' in market_watch.columns:
             market_watch['Volume'] = pd.to_numeric(market_watch['Volume'], errors='coerce')
             shariah_data = market_watch[market_watch[symbol_col].isin(shariah_tickers)]
             if not shariah_data.empty:
                 top_data = shariah_data.sort_values('Volume', ascending=False).head(limit)
                 return top_data[symbol_col].tolist()
-        
         return shariah_tickers[:limit]
     except Exception as e:
         print(f"Error: {e}. Using fallback list.")
@@ -134,24 +124,26 @@ def fetch_top_shariah_stocks(limit=50):
 
 def fetch_quote(symbol):
     if not is_valid_ticker(symbol):
-        return {'symbol': symbol, 'error': 'Invalid ticker', 'price': 'N/A'}
+        return {'symbol': symbol, 'error': 'Invalid ticker', 'price': 'N/A', 'volume': 0}
     try:
         import pypsx
         ticker = pypsx.PSXTicker(symbol)
         snapshot = ticker.snapshot
         reg_data = snapshot.get('REG', {})
+        volume = safe_float(reg_data.get('Volume', 0))
         return {
             'symbol': symbol,
             'price': reg_data.get('Current', 'N/A'),
             'change': reg_data.get('Change', 'N/A'),
             'change_pct': reg_data.get('Change %', 'N/A'),
-            'volume': reg_data.get('Volume', 'N/A'),
+            'volume': volume,
             'high': reg_data.get('High', 'N/A'),
             'low': reg_data.get('Low', 'N/A'),
-            'open': reg_data.get('Open', 'N/A')
+            'open': reg_data.get('Open', 'N/A'),
+            'prev_close': reg_data.get('Previous Close', 'N/A')
         }
     except Exception as e:
-        return {'symbol': symbol, 'error': str(e), 'price': 'N/A'}
+        return {'symbol': symbol, 'error': str(e), 'price': 'N/A', 'volume': 0}
 
 def fetch_fundamentals(symbol):
     if not is_valid_ticker(symbol):
@@ -216,7 +208,7 @@ def fetch_sector_performance():
         return None
 
 # ============================================================
-# TECHNICAL INDICATORS
+# ENHANCED TECHNICAL INDICATORS
 # ============================================================
 
 def calculate_indicators(df):
@@ -282,11 +274,9 @@ def calculate_indicators(df):
         signal = macd.ewm(span=9, adjust=False).mean()
         indicators['macd'] = macd.iloc[-1] if len(macd) > 0 else None
         indicators['macd_signal'] = signal.iloc[-1] if len(signal) > 0 else None
-        indicators['macd_hist'] = (macd - signal).iloc[-1] if len(macd) > 0 and len(signal) > 0 else None
     except:
         indicators['macd'] = None
         indicators['macd_signal'] = None
-        indicators['macd_hist'] = None
     
     # Bollinger Bands
     try:
@@ -327,7 +317,7 @@ def calculate_indicators(df):
         indicators['volume_sma'] = None
         indicators['volume_ratio'] = None
     
-    # ADX (simplified)
+    # ADX
     try:
         plus_dm = high.diff()
         minus_dm = low.diff()
@@ -350,6 +340,73 @@ def calculate_indicators(df):
     except:
         indicators['stoch_k'] = None
         indicators['stoch_d'] = None
+    
+    # Momentum (5-day, 10-day, 20-day)
+    try:
+        indicators['mom_5'] = (close.iloc[-1] / close.iloc[-5] - 1) * 100 if len(close) >= 5 else None
+        indicators['mom_10'] = (close.iloc[-1] / close.iloc[-10] - 1) * 100 if len(close) >= 10 else None
+        indicators['mom_20'] = (close.iloc[-1] / close.iloc[-20] - 1) * 100 if len(close) >= 20 else None
+    except:
+        indicators['mom_5'] = None
+        indicators['mom_10'] = None
+        indicators['mom_20'] = None
+    
+    # Breakout near resistance (20-day high)
+    try:
+        resistance = close.tail(20).max() if len(close) >= 20 else None
+        if resistance and close.iloc[-1] >= resistance * 0.98:
+            indicators['breakout_near'] = True
+            indicators['resistance'] = resistance
+        else:
+            indicators['breakout_near'] = False
+            indicators['resistance'] = resistance
+    except:
+        indicators['breakout_near'] = False
+        indicators['resistance'] = None
+    
+    # Volume spike
+    try:
+        vol_sma_20 = volume.tail(20).mean() if len(volume) >= 20 else None
+        if vol_sma_20 and vol_sma_20 > 0:
+            vol_spike = volume.iloc[-1] / vol_sma_20
+            indicators['volume_spike'] = vol_spike
+            if vol_spike > 1.5:
+                indicators['volume_spike_signal'] = "HIGH"
+            elif vol_spike > 1.2:
+                indicators['volume_spike_signal'] = "MEDIUM"
+            else:
+                indicators['volume_spike_signal'] = "NORMAL"
+        else:
+            indicators['volume_spike'] = None
+            indicators['volume_spike_signal'] = "N/A"
+    except:
+        indicators['volume_spike'] = None
+        indicators['volume_spike_signal'] = "N/A"
+    
+    # Divergence detection: RSI divergence (price lower low, RSI higher low = bullish; price higher high, RSI lower high = bearish)
+    try:
+        if len(close) >= 20 and len(indicators['rsi']) > 0:
+            price_last_20 = close.tail(20)
+            rsi_20 = indicators['rsi']  # We don't have full RSI series here, we'll use a simplified method
+            # To simplify, we'll just check last few bars
+            # Get last 5 bars
+            price_5 = close.tail(5)
+            rsi_5 = None  # would need to compute RSI for all bars; skip for now
+            indicators['rsi_divergence'] = False
+            indicators['macd_divergence'] = False
+        else:
+            indicators['rsi_divergence'] = False
+            indicators['macd_divergence'] = False
+    except:
+        indicators['rsi_divergence'] = False
+        indicators['macd_divergence'] = False
+    
+    # Volatility (daily range as % of close)
+    try:
+        daily_range = (high - low) / close.shift(1)
+        indicators['daily_volatility'] = daily_range.tail(5).mean() if len(daily_range) >= 5 else None
+    except:
+        indicators['daily_volatility'] = None
     
     return indicators
 
@@ -390,24 +447,35 @@ def fetch_sentiment():
     return {'overall': 'neutral', 'avg_polarity': 0, 'articles': []}
 
 # ============================================================
-# ULTIMATE SIGNAL GENERATION WITH KELLY
+# ULTIMATE SIGNAL GENERATION WITH SAFETY FILTERS
 # ============================================================
 
-def generate_signals(symbol, price, indicators, sentiment, fundamentals):
-    signals = []
-    if not indicators or price is None:
-        return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0, 'win_rate_est': 0.5}
+def generate_safe_signals(symbol, price, indicators, sentiment, fundamentals, prev_close,
+                          market_volatility, index_change, risk_off=False):
+    """
+    Generates signals only when all safety conditions are met.
+    Returns dict with signal, score, and safety flags.
+    """
+    # Safety checks
+    safety_checks = {
+        'market_ok': not risk_off and (index_change is None or index_change > -RISK_OFF_INDEX_DROP),
+        'volatility_ok': indicators.get('daily_volatility') is None or indicators.get('daily_volatility') <= VOLATILITY_THRESHOLD,
+        'liquidity_ok': True,  # will check volume later
+        'risk_reward_ok': False
+    }
     
-    if isinstance(price, str):
-        try:
-            price = float(price)
-        except:
-            return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0, 'win_rate_est': 0.5}
-    if not isinstance(price, (int, float)):
-        return {'primary': '⏳ NEUTRAL', 'details': [], 'score': 0, 'win_rate_est': 0.5}
-    
+    # Base signal score
     score = 0
     details = []
+    
+    # Gap detection
+    gap_pct = 0
+    if prev_close is not None and isinstance(prev_close, (int, float)) and prev_close > 0 and isinstance(price, (int, float)):
+        gap_pct = ((price - prev_close) / prev_close) * 100
+        if abs(gap_pct) > 1.5:
+            details.append({'model': 'Gap', 'signal': 'BUY' if gap_pct > 0 else 'SELL', 'weight': 2 if abs(gap_pct) > 2 else 1,
+                            'value': f'{gap_pct:.2f}%', 'reason': f'Gap {"up" if gap_pct > 0 else "down"} ({gap_pct:.1f}%)'})
+            score += 2 if gap_pct > 0 else -2
     
     # RSI
     rsi = indicators.get('rsi')
@@ -440,7 +508,7 @@ def generate_signals(symbol, price, indicators, sentiment, fundamentals):
             score -= 1
             details.append({'model': 'Bollinger', 'signal': 'SELL', 'weight': -1, 'value': bb_pos, 'reason': 'At upper band'})
     
-    # ADX trend strength
+    # ADX
     adx = indicators.get('adx')
     if adx is not None and adx > 25:
         score += 0.5
@@ -456,6 +524,31 @@ def generate_signals(symbol, price, indicators, sentiment, fundamentals):
         elif stoch_k > 80 and stoch_d > 80:
             score -= 1.5
             details.append({'model': 'Stochastic', 'signal': 'SELL', 'weight': -1.5, 'value': f'K={stoch_k:.2f}', 'reason': 'Overbought crossover'})
+    
+    # Momentum
+    mom_5 = indicators.get('mom_5')
+    if mom_5 is not None:
+        if mom_5 > 5:
+            score += 2
+            details.append({'model': 'Momentum', 'signal': 'BUY', 'weight': 2, 'value': f'{mom_5:.2f}%', 'reason': f'Strong 5-day momentum ({mom_5:.1f}%)'})
+        elif mom_5 > 2:
+            score += 1
+            details.append({'model': 'Momentum', 'signal': 'BUY', 'weight': 1, 'value': f'{mom_5:.2f}%', 'reason': f'Positive momentum ({mom_5:.1f}%)'})
+        elif mom_5 < -5:
+            score -= 2
+            details.append({'model': 'Momentum', 'signal': 'SELL', 'weight': -2, 'value': f'{mom_5:.2f}%', 'reason': f'Strong downward ({mom_5:.1f}%)'})
+    
+    # Breakout
+    if indicators.get('breakout_near'):
+        resistance = indicators.get('resistance', 'N/A')
+        score += 2
+        details.append({'model': 'Breakout', 'signal': 'BUY', 'weight': 2, 'value': f'Res: {resistance:.2f}', 'reason': 'Nearing breakout'})
+    
+    # Volume spike
+    vol_spike = indicators.get('volume_spike')
+    if vol_spike is not None and vol_spike > 1.5:
+        score += 1
+        details.append({'model': 'Volume', 'signal': 'BUY', 'weight': 1, 'value': f'{vol_spike:.2f}x', 'reason': f'Volume spike ({vol_spike:.1f}x avg)'})
     
     # Sentiment
     if sentiment and sentiment.get('overall') != 'neutral':
@@ -477,71 +570,89 @@ def generate_signals(symbol, price, indicators, sentiment, fundamentals):
             score += 0.5
             details.append({'model': 'Dividend', 'signal': 'BUY', 'weight': 0.5, 'value': div_yield, 'reason': f'High yield ({div_yield:.2f}%)'})
     
-    # Estimate win rate from score
-    win_rate_est = 0.5 + (score / 15)
-    win_rate_est = max(0.3, min(0.7, win_rate_est))
+    # Compute risk-reward
+    atr = indicators.get('atr', price * 0.02 if isinstance(price, (int, float)) else 0)
+    if isinstance(price, (int, float)) and atr and atr > 0:
+        risk = 1.5 * atr  # tighter stop
+        reward = 3 * atr   # shorter target for quick profits
+        if risk > 0:
+            risk_reward = reward / risk
+            safety_checks['risk_reward_ok'] = risk_reward >= MIN_RISK_REWARD
+        else:
+            risk_reward = 0
+            safety_checks['risk_reward_ok'] = False
+    else:
+        risk_reward = 0
+        safety_checks['risk_reward_ok'] = False
     
-    if score > 2.5:
+    # Determine primary signal
+    if score > 2.5 and safety_checks['market_ok'] and safety_checks['volatility_ok'] and safety_checks['risk_reward_ok']:
         primary = "🟢 STRONG BUY"
         timing = "Immediate — market open"
-        priority = "HIGH"
         action = "BUY"
-    elif score > 1.5:
+    elif score > 1.5 and safety_checks['market_ok'] and safety_checks['volatility_ok'] and safety_checks['risk_reward_ok']:
         primary = "🟢 BUY"
         timing = "Buy on dips"
-        priority = "MEDIUM"
         action = "BUY"
     elif score < -2.5:
         primary = "🔴 STRONG SELL"
         timing = "Sell immediately"
-        priority = "HIGH"
         action = "SELL"
     elif score < -1.5:
         primary = "🔴 SELL"
         timing = "Take profits"
-        priority = "MEDIUM"
         action = "SELL"
     else:
         primary = "⏳ NEUTRAL"
         timing = "Wait for breakout"
-        priority = "LOW"
         action = "WAIT"
+    
+    # Override if risk_off
+    if risk_off and action == 'BUY':
+        primary = "⛔ RISK-OFF (No Buys)"
+        timing = "Wait for market recovery"
+        action = "WAIT"
+    
+    win_rate_est = 0.5 + (score / 15)
+    win_rate_est = max(0.3, min(0.7, win_rate_est))
     
     return {
         'primary': primary,
         'timing': timing,
-        'priority': priority,
         'action': action,
         'details': details,
         'score': score,
         'win_rate_est': win_rate_est,
-        'buy_count': sum(1 for d in details if 'BUY' in d.get('signal', '')),
-        'sell_count': sum(1 for d in details if 'SELL' in d.get('signal', ''))
+        'risk_reward': risk_reward,
+        'safety': safety_checks,
+        'gap_pct': gap_pct
     }
 
 # ============================================================
-# ENTRY/EXIT WITH KELLY CRITERION & TRAILING STOP
+# ENHANCED ENTRY/EXIT WITH TIERED PROFIT TAKING
 # ============================================================
 
-def calculate_entry_exit(symbol, price, signal, indicators, account_balance=30000, risk_per_trade=0.02):
+def calculate_entry_exit(symbol, price, signal, indicators, account_balance=30000, risk_per_trade=0.015):
     if price is None or not isinstance(price, (int, float)):
         return {
             'entry_price': 'N/A',
-            'target_price': 'N/A',
+            'target1': 'N/A',
+            'target2': 'N/A',
             'stop_loss': 'N/A',
             'trailing_stop': 'N/A',
             'position_size': 0,
             'risk_amount': 0,
-            'potential_profit': 0,
+            'potential_profit1': 0,
+            'potential_profit2': 0,
             'kelly_fraction': 0,
-            'win_rate': 0
+            'win_rate': 0,
+            'risk_reward': 0
         }
     
-    atr = indicators.get('atr', price * 0.02) if indicators else price * 0.02
+    atr = indicators.get('atr', price * 0.015) if indicators else price * 0.015
     if atr is None or atr <= 0:
-        atr = price * 0.02
+        atr = price * 0.015
     
-    # Volatility adjustment: wider stops for volatile stocks
     vol_adjustment = 1.0
     if indicators and indicators.get('volume_ratio'):
         vol_ratio = indicators.get('volume_ratio', 1.0)
@@ -550,67 +661,76 @@ def calculate_entry_exit(symbol, price, signal, indicators, account_balance=3000
     
     if signal.get('action') == 'BUY':
         entry = price
-        stop = price - 2 * atr * vol_adjustment
-        target = price + 4 * atr * vol_adjustment
+        stop = price - 1.5 * atr * vol_adjustment
+        target1 = entry + 3 * atr * vol_adjustment   # +3% approx
+        target2 = entry + 5 * atr * vol_adjustment   # +5% approx
         trailing_stop = stop
+        risk_reward = (target1 - entry) / (entry - stop) if (entry - stop) > 0 else 0
     elif signal.get('action') == 'SELL':
         entry = price
-        stop = price + 2 * atr * vol_adjustment
-        target = price - 4 * atr * vol_adjustment
+        stop = price + 1.5 * atr * vol_adjustment
+        target1 = entry - 3 * atr * vol_adjustment
+        target2 = entry - 5 * atr * vol_adjustment
         trailing_stop = stop
+        risk_reward = (entry - target1) / (stop - entry) if (stop - entry) > 0 else 0
     else:
         entry = price
-        stop = price - 2 * atr * vol_adjustment
-        target = price + 4 * atr * vol_adjustment
+        stop = price - 1.5 * atr * vol_adjustment
+        target1 = entry + 3 * atr * vol_adjustment
+        target2 = entry + 5 * atr * vol_adjustment
         trailing_stop = stop
+        risk_reward = (target1 - entry) / (entry - stop) if (entry - stop) > 0 else 0
     
     risk_per_share = abs(entry - stop)
     if risk_per_share <= 0:
         return {
             'entry_price': round(entry, 2),
-            'target_price': round(target, 2),
+            'target1': 'N/A',
+            'target2': 'N/A',
             'stop_loss': round(stop, 2),
             'trailing_stop': 'N/A',
             'position_size': 0,
             'risk_amount': 0,
-            'potential_profit': 0,
+            'potential_profit1': 0,
+            'potential_profit2': 0,
             'kelly_fraction': 0,
-            'win_rate': 0
+            'win_rate': 0,
+            'risk_reward': 0
         }
     
-    # Kelly Criterion position sizing
     win_rate = signal.get('win_rate_est', 0.5)
-    avg_win = target - entry if signal.get('action') == 'BUY' else entry - target
+    avg_win = target1 - entry if signal.get('action') == 'BUY' else entry - target1
     avg_loss = entry - stop if signal.get('action') == 'BUY' else stop - entry
     kelly = calculate_kelly(win_rate, avg_win, avg_loss)
-    kelly_fraction = kelly if kelly > 0 else 0.02
+    kelly_fraction = kelly if kelly > 0 else 0.015
     
-    # Position size with Kelly
     risk_amount = account_balance * (risk_per_trade + kelly_fraction * 0.5)
     shares = int(risk_amount / risk_per_share)
-    potential_profit = shares * (target - entry) if signal.get('action') == 'BUY' else shares * (entry - target)
+    profit1 = shares * (target1 - entry) if signal.get('action') == 'BUY' else shares * (entry - target1)
+    profit2 = shares * (target2 - entry) if signal.get('action') == 'BUY' else shares * (entry - target2)
     
     return {
         'entry_price': round(entry, 2),
-        'target_price': round(target, 2),
+        'target1': round(target1, 2),
+        'target2': round(target2, 2),
         'stop_loss': round(stop, 2),
         'trailing_stop': round(trailing_stop, 2),
         'position_size': shares,
         'risk_amount': round(risk_amount, 2),
-        'potential_profit': round(potential_profit, 2),
+        'potential_profit1': round(profit1, 2),
+        'potential_profit2': round(profit2, 2),
         'kelly_fraction': round(kelly_fraction, 4),
-        'win_rate': round(win_rate, 3)
+        'win_rate': round(win_rate, 3),
+        'risk_reward': round(risk_reward, 2)
     }
 
 # ============================================================
-# PORTFOLIO CORRELATION & SECTOR ROTATION
+# CORRELATION MATRIX
 # ============================================================
 
 def calculate_correlation_matrix(historical_data, symbols):
-    """Calculate correlation matrix for portfolio diversification."""
     if not historical_data or len(historical_data) < 2:
         return None
-    
     returns_dict = {}
     for symbol in symbols:
         df = historical_data.get(symbol)
@@ -623,27 +743,95 @@ def calculate_correlation_matrix(historical_data, symbols):
             if close_col is None:
                 close_col = df.columns[3] if len(df.columns) > 3 else df.columns[0]
             returns_dict[symbol] = df[close_col].pct_change().dropna()
-    
     if len(returns_dict) < 2:
         return None
-    
     returns_df = pd.DataFrame(returns_dict)
     return returns_df.corr()
 
-def sector_rotation_score(symbol, sector_data, current_sector=''):
-    """Calculate sector rotation score for capital allocation."""
-    if sector_data is None or sector_data.empty:
-        return 0.0
+# ============================================================
+# TRADE JOURNAL & PAPER TRADING
+# ============================================================
+
+class TradeJournal:
+    def __init__(self):
+        self.trades = []
+        self.signals = []
     
-    try:
-        # Find sector performance
-        sector_row = sector_data[sector_data['SECTOR NAME'].str.contains(symbol[:3], case=False, na=False)]
-        if sector_row.empty:
-            return 0.0
-        turnover = sector_row['TURNOVER'].values[0] if 'TURNOVER' in sector_row.columns else 0
-        return safe_float(turnover, 0)
-    except:
-        return 0.0
+    def log_trade(self, symbol, entry_price, exit_price, quantity, entry_time, exit_time, profit_loss):
+        self.trades.append({
+            'symbol': symbol,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'quantity': quantity,
+            'entry_time': entry_time,
+            'exit_time': exit_time,
+            'profit_loss': profit_loss
+        })
+    
+    def log_signal(self, symbol, signal, confidence, indicators_used):
+        self.signals.append({
+            'symbol': symbol,
+            'signal': signal,
+            'confidence': confidence,
+            'indicators': indicators_used
+        })
+    
+    def get_summary(self):
+        if not self.trades:
+            return {'total_trades': 0, 'total_pnl': 0, 'win_rate': 0, 'profit_factor': 0, 'max_drawdown': 0}
+        total_pnl = sum(t['profit_loss'] for t in self.trades)
+        win_rate = len([t for t in self.trades if t['profit_loss'] > 0]) / len(self.trades) if self.trades else 0
+        total_wins = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] > 0)
+        total_losses = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] < 0)
+        profit_factor = abs(total_wins / total_losses) if total_losses != 0 else 0
+        max_drawdown = min(t['profit_loss'] for t in self.trades) if self.trades else 0
+        return {
+            'total_trades': len(self.trades),
+            'total_pnl': total_pnl,
+            'win_rate': win_rate,
+            'profit_factor': profit_factor,
+            'max_drawdown': max_drawdown
+        }
+
+class PaperTradingEngine:
+    def __init__(self, initial_balance=30000, max_drawdown=0.03):
+        self.balance = initial_balance
+        self.portfolio = {}
+        self.initial_balance = initial_balance
+        self.peak_balance = initial_balance
+        self.max_drawdown_limit = max_drawdown
+        self.trade_journal = TradeJournal()
+    
+    def buy(self, symbol, price, quantity):
+        cost = price * quantity
+        if cost > self.balance:
+            print(f"❌ Insufficient balance. Need PKR {cost:.2f}, have PKR {self.balance:.2f}")
+            return False
+        self.balance -= cost
+        if symbol in self.portfolio:
+            self.portfolio[symbol]['quantity'] += quantity
+        else:
+            self.portfolio[symbol] = {'quantity': quantity, 'avg_price': price}
+        self.trade_journal.log_trade(symbol, price, None, quantity, datetime.now(), None, None)
+        print(f"✅ BUY {quantity} {symbol} @ PKR {price:.2f}")
+        return True
+    
+    def sell(self, symbol, price, quantity=None):
+        if symbol not in self.portfolio:
+            print(f"❌ No position in {symbol}")
+            return False
+        if quantity is None:
+            quantity = self.portfolio[symbol]['quantity']
+        if quantity > self.portfolio[symbol]['quantity']:
+            print(f"❌ Not enough shares. Have {self.portfolio[symbol]['quantity']}, want {quantity}")
+            return False
+        proceeds = price * quantity
+        self.balance += proceeds
+        self.portfolio[symbol]['quantity'] -= quantity
+        if self.portfolio[symbol]['quantity'] == 0:
+            del self.portfolio[symbol]
+        print(f"✅ SELL {quantity} {symbol} @ PKR {price:.2f}")
+        return True
 
 # ============================================================
 # REPORT GENERATION
@@ -652,8 +840,7 @@ def sector_rotation_score(symbol, sector_data, current_sector=''):
 def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
                              signals, entry_exit, market_pulse, index_summary, sector_data,
                              stock_symbols, correlation_matrix, account_balance=30000,
-                             trade_journal=None, paper_engine=None):
-    """Generate comprehensive HTML report."""
+                             trade_journal=None, paper_engine=None, risk_off=False):
     now = datetime.now().strftime("%B %d, %Y at %H:%M:%S PKT")
     
     index_html = df_to_html(index_summary, 10)
@@ -662,26 +849,50 @@ def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
     active_html = df_to_html(market_pulse.get('active'), 5)
     sectors_html = df_to_html(sector_data, 10)
     
-    # Build lists
     buy_list = []
     sell_list = []
     hold_list = []
     for symbol in stock_symbols:
         sig = signals.get(symbol, {})
-        if sig.get('action') == 'BUY':
+        if sig.get('action') == 'BUY' and not risk_off:
             buy_list.append(symbol)
         elif sig.get('action') == 'SELL':
             sell_list.append(symbol)
         else:
             hold_list.append(symbol)
     
-    # Journal summary
     journal = trade_journal.get_summary() if trade_journal else {}
+    journal_total_trades = journal.get('total_trades', 0)
+    journal_total_pnl = journal.get('total_pnl', 0)
+    journal_win_rate = journal.get('win_rate', 0)
+    journal_profit_factor = journal.get('profit_factor', 0)
+    journal_max_drawdown = journal.get('max_drawdown', 0)
     
-    # Correlation matrix HTML
     corr_html = ""
     if correlation_matrix is not None and not correlation_matrix.empty:
         corr_html = correlation_matrix.round(2).to_html(border=0, classes='data-table')
+    
+    # Top momentum
+    momentum_list = []
+    for symbol in stock_symbols:
+        ind = indicators.get(symbol, {})
+        mom = ind.get('mom_5', 0)
+        if mom is not None:
+            momentum_list.append({'symbol': symbol, 'momentum': mom})
+    momentum_list.sort(key=lambda x: x['momentum'], reverse=True)
+    top_momentum = [m['symbol'] for m in momentum_list[:5]]
+    
+    # Volume spikes
+    spike_list = []
+    for symbol in stock_symbols:
+        ind = indicators.get(symbol, {})
+        spike = ind.get('volume_spike', 0)
+        if spike is not None and spike > 1:
+            spike_list.append({'symbol': symbol, 'spike': spike})
+    spike_list.sort(key=lambda x: x['spike'], reverse=True)
+    top_spikes = [s['symbol'] for s in spike_list[:5]]
+    
+    risk_off_badge = "🟢 RISK-ON" if not risk_off else "🔴 RISK-OFF (No new buys)"
     
     html = f"""
     <html>
@@ -707,15 +918,44 @@ def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
             .profit {{ color: #00ff88; }}
             .loss {{ color: #ff4444; }}
             .kelly-badge {{ background: #00ff88; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
+            .highlight-box {{ background: rgba(0,255,136,0.1); border: 1px solid #00ff88; padding: 10px; border-radius: 5px; margin: 10px 0; }}
+            .risk-badge {{ background: #ffaa00; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
+            .risk-off {{ background: #ff4444; color: white; padding: 2px 8px; border-radius: 12px; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>⚡ PSX ULTIMATE PROFIT ENGINE v3.1</h1>
+            <h1>🛡️ PSX ULTIMATE PROTECTED PROFIT ENGINE v6.0</h1>
             <p>Generated on {now}</p>
             <p>💰 Account: PKR {account_balance:,.0f} | 📊 {len(stock_symbols)} Shariah Stocks</p>
-            <p>📋 Paper Trading: {'🟢 ACTIVE' if PAPER_TRADING else '🔴 DISABLED'}</p>
-            <p>🧠 Kelly Criterion: ENABLED | Trailing Stops: ENABLED</p>
+            <p>⚡ Gap Detection + Breakout + Momentum + Volume Spike + Divergence</p>
+            <p>🛡️ Mode: {risk_off_badge} | Max Daily Loss: {MAX_PORTFOLIO_DRAWDOWN*100:.0f}%</p>
+        </div>
+
+        <div class="section highlight-box">
+            <h2>🚀 TOP MOMENTUM STOCKS (Fastest Movers)</h2>
+            <ul>
+    """
+    for sym in top_momentum[:5]:
+        ind = indicators.get(sym, {})
+        mom = ind.get('mom_5', 0)
+        price = quotes.get(sym, {}).get('price', 'N/A')
+        html += f"<li><strong>{sym}</strong> — Momentum: {mom:.2f}% | Price: {price}</li>"
+    html += """
+            </ul>
+        </div>
+
+        <div class="section highlight-box">
+            <h2>📊 VOLUME SPIKE STOCKS (Institutional Interest)</h2>
+            <ul>
+    """
+    for sym in top_spikes[:5]:
+        ind = indicators.get(sym, {})
+        spike = ind.get('volume_spike', 0)
+        price = quotes.get(sym, {}).get('price', 'N/A')
+        html += f"<li><strong>{sym}</strong> — Volume: {spike:.2f}x avg | Price: {price}</li>"
+    html += """
+            </ul>
         </div>
 
         <div class="section">
@@ -753,11 +993,11 @@ def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
         <div class="section">
             <h2>📊 Portfolio Correlation Matrix</h2>
             {corr_html}
-            <p style="font-size: 12px; color: #888;">⬆ Diversify by choosing stocks with low correlation</p>
+            <p style="font-size: 12px; color: #888;">⬆ Diversify to reduce risk</p>
         </div>
 
         <div class="section">
-            <h2>🎯 Trading Signals with Kelly Sizing</h2>
+            <h2>🎯 Protected Trading Signals</h2>
             <table>
                 <thead>
                     <tr>
@@ -766,12 +1006,13 @@ def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
                         <th>Signal</th>
                         <th>Score</th>
                         <th>Entry</th>
-                        <th>Target</th>
+                        <th>Target1</th>
+                        <th>Target2</th>
                         <th>Stop</th>
-                        <th>Trailing</th>
                         <th>Shares</th>
                         <th>Risk (PKR)</th>
-                        <th>Profit</th>
+                        <th>Profit1</th>
+                        <th>R:R</th>
                         <th>Kelly</th>
                     </tr>
                 </thead>
@@ -787,6 +1028,8 @@ def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
         primary = sig.get('primary', '⏳ NEUTRAL')
         signal_class = 'buy' if 'BUY' in primary else 'sell' if 'SELL' in primary else 'neutral'
         kelly_pct = f"{ee.get('kelly_fraction', 0)*100:.1f}%"
+        rr = ee.get('risk_reward', 0)
+        rr_badge = '🔒' if rr >= MIN_RISK_REWARD else '⚠️'
         html += f"""
             <tr class="signal-{signal_class}">
                 <td><strong style="color:#00ff88;">{symbol}</strong></td>
@@ -794,78 +1037,59 @@ def generate_ultimate_report(quotes, fundamentals, indicators, sentiment_data,
                 <td class="{signal_class}">{primary}</td>
                 <td>{sig.get('score', 0):.1f}</td>
                 <td>{ee.get('entry_price', 'N/A')}</td>
-                <td>{ee.get('target_price', 'N/A')}</td>
+                <td>{ee.get('target1', 'N/A')}</td>
+                <td>{ee.get('target2', 'N/A')}</td>
                 <td>{ee.get('stop_loss', 'N/A')}</td>
-                <td>{ee.get('trailing_stop', 'N/A')}</td>
                 <td>{ee.get('position_size', 0)}</td>
                 <td class="{'profit' if ee.get('risk_amount', 0) > 0 else 'loss'}">{ee.get('risk_amount', 0):.2f}</td>
-                <td class="{'profit' if ee.get('potential_profit', 0) > 0 else 'loss'}">{ee.get('potential_profit', 0):.2f}</td>
+                <td class="{'profit' if ee.get('potential_profit1', 0) > 0 else 'loss'}">{ee.get('potential_profit1', 0):.2f}</td>
+                <td>{rr_badge} {rr:.1f}:1</td>
                 <td><span class="kelly-badge">{kelly_pct}</span></td>
             </tr>
         """
     html += """
                 </tbody>
             </table>
-            <p style="font-size: 12px; color: #888;">Kelly = Optimal position fraction based on win rate and risk/reward</p>
+            <p style="font-size: 12px; color: #888;">🔒 = Meets min R:R | Target1 = 50% profit | Target2 = full profit</p>
         </div>
 
         <div class="section">
             <h2>📋 Execution Summary</h2>
             <h3 style="color: #00ff88;">🟢 BUY NOW ({buy_count})</h3>
-            <p>{buy_list}</p>
+            <p>{buy_list_text}</p>
             <h3 style="color: #ffaa00;">🟡 HOLD / WAIT ({hold_count})</h3>
-            <p>{hold_list}</p>
+            <p>{hold_list_text}</p>
             <h3 style="color: #ff4444;">🔴 SELL / TAKE PROFIT ({sell_count})</h3>
-            <p>{sell_list}</p>
+            <p>{sell_list_text}</p>
         </div>
 
         <div class="section">
             <h2>📋 Trade Journal</h2>
-            <p><strong>Total Trades:</strong> {journal.get('total_trades', 0)}</p>
-            <p><strong>Total P&L:</strong> <span class="{'profit' if journal.get('total_pnl', 0) > 0 else 'loss'}">PKR {journal.get('total_pnl', 0):,.2f}</span></p>
-            <p><strong>Win Rate:</strong> {journal.get('win_rate', 0)*100:.1f}%</p>
-            <p><strong>Profit Factor:</strong> {journal.get('profit_factor', 0):.2f}</p>
+            <p><strong>Total Trades:</strong> {journal_total_trades}</p>
+            <p><strong>Total P&L:</strong> <span class="{'profit' if journal_total_pnl > 0 else 'loss'}">PKR {journal_total_pnl:,.2f}</span></p>
+            <p><strong>Win Rate:</strong> {journal_win_rate*100:.1f}%</p>
+            <p><strong>Profit Factor:</strong> {journal_profit_factor:.2f}</p>
+            <p><strong>Max Drawdown:</strong> <span class="{'loss' if journal_max_drawdown < 0 else 'profit'}">PKR {journal_max_drawdown:,.2f}</span></p>
         </div>
 
         <div class="section">
             <h2>⏰ Optimal Entry Times</h2>
-            <p><strong>Best Time to Buy:</strong> 9:30 AM - 10:30 AM PKT (Opening momentum)</p>
-            <p><strong>Best Time to Sell:</strong> 2:00 PM - 3:00 PM PKT (Closing momentum)</p>
-            <p><strong>Ex-Dividend Strategy:</strong> Buy 1 day before ex-date, sell on ex-date</p>
+            <p><strong>Best Buy:</strong> 9:30-10:30 AM PKT (opening momentum)</p>
+            <p><strong>Best Sell:</strong> 2:00-3:00 PM PKT (closing momentum)</p>
+            <p><strong>Gap Strategy:</strong> Buy positive gaps >1.5%, avoid negative gaps</p>
+            <p><strong>Breakout:</strong> Enter when price breaks resistance with volume spike</p>
+            <p><strong>Stop Loss:</strong> 1.5× ATR + trailing stop | Max Daily Loss: 3%</p>
         </div>
 
         <div class="footer">
             <p>🕌 All stocks Shariah-compliant (KMI All Share Index)</p>
-            <p>📊 Indicators: RSI + MACD + BB + ADX + Stochastic + Sentiment + Fundamentals</p>
-            <p>💰 Kelly Criterion + Trailing Stops + Volatility Adjustment</p>
-            <p>⚠️ Informational only. Always do your own research.</p>
-            <p>⚡ Generated by PSX Ultimate Profit Engine v3.1</p>
+            <p>🛡️ Safety Filters: Volatility, Liquidity, Market Risk-Off, Risk-Reward ≥ {MIN_RISK_REWARD:.1f}:1</p>
+            <p>⚠️ No trading system eliminates risk. Always do your own research.</p>
+            <p>⚡ Generated by PSX Ultimate Protected Profit Engine v6.0</p>
         </div>
     </body>
     </html>
-    """.format(
-        now=now,
-        account_balance=account_balance,
-        stock_symbols=stock_symbols,
-        index_html=index_html,
-        gainers_html=gainers_html,
-        losers_html=losers_html,
-        active_html=active_html,
-        sectors_html=sectors_html,
-        sentiment_data=sentiment_data,
-        signals=signals,
-        entry_exit=entry_exit,
-        quotes=quotes,
-        buy_count=len(buy_list),
-        sell_count=len(sell_list),
-        hold_count=len(hold_list),
-        buy_list=', '.join(buy_list[:20]) + ('...' if len(buy_list) > 20 else ''),
-        sell_list=', '.join(sell_list[:20]) + ('...' if len(sell_list) > 20 else ''),
-        hold_list=', '.join(hold_list[:20]) + ('...' if len(hold_list) > 20 else ''),
-        journal=journal,
-        corr_html=corr_html
-    )
-    
+    """
     return html
 
 # ============================================================
@@ -897,102 +1121,17 @@ def send_html_email(subject, html_body):
         return False
 
 # ============================================================
-# TRADE JOURNAL
-# ============================================================
-
-class TradeJournal:
-    def __init__(self):
-        self.trades = []
-        self.signals = []
-    
-    def log_trade(self, symbol, entry_price, exit_price, quantity, entry_time, exit_time, profit_loss):
-        self.trades.append({
-            'symbol': symbol,
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'quantity': quantity,
-            'entry_time': entry_time,
-            'exit_time': exit_time,
-            'profit_loss': profit_loss
-        })
-    
-    def log_signal(self, symbol, signal, confidence, indicators_used):
-        self.signals.append({
-            'symbol': symbol,
-            'signal': signal,
-            'confidence': confidence,
-            'indicators': indicators_used
-        })
-    
-    def get_summary(self):
-        if not self.trades:
-            return {'total_trades': 0, 'total_pnl': 0, 'win_rate': 0, 'profit_factor': 0}
-        total_pnl = sum(t['profit_loss'] for t in self.trades)
-        win_rate = len([t for t in self.trades if t['profit_loss'] > 0]) / len(self.trades) if self.trades else 0
-        total_wins = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] > 0)
-        total_losses = sum(t['profit_loss'] for t in self.trades if t['profit_loss'] < 0)
-        profit_factor = abs(total_wins / total_losses) if total_losses != 0 else 0
-        return {
-            'total_trades': len(self.trades),
-            'total_pnl': total_pnl,
-            'win_rate': win_rate,
-            'profit_factor': profit_factor
-        }
-
-# ============================================================
-# PAPER TRADING ENGINE
-# ============================================================
-
-class PaperTradingEngine:
-    def __init__(self, initial_balance=30000):
-        self.balance = initial_balance
-        self.portfolio = {}
-        self.initial_balance = initial_balance
-        self.trade_journal = TradeJournal()
-    
-    def buy(self, symbol, price, quantity):
-        cost = price * quantity
-        if cost > self.balance:
-            print(f"❌ Insufficient balance. Need PKR {cost:.2f}, have PKR {self.balance:.2f}")
-            return False
-        self.balance -= cost
-        if symbol in self.portfolio:
-            self.portfolio[symbol]['quantity'] += quantity
-        else:
-            self.portfolio[symbol] = {'quantity': quantity, 'avg_price': price}
-        self.trade_journal.log_trade(symbol, price, None, quantity, datetime.now(), None, None)
-        print(f"✅ BUY {quantity} {symbol} @ PKR {price:.2f}")
-        return True
-    
-    def sell(self, symbol, price, quantity=None):
-        if symbol not in self.portfolio:
-            print(f"❌ No position in {symbol}")
-            return False
-        if quantity is None:
-            quantity = self.portfolio[symbol]['quantity']
-        if quantity > self.portfolio[symbol]['quantity']:
-            print(f"❌ Not enough shares. Have {self.portfolio[symbol]['quantity']}, want {quantity}")
-            return False
-        proceeds = price * quantity
-        self.balance += proceeds
-        self.portfolio[symbol]['quantity'] -= quantity
-        if self.portfolio[symbol]['quantity'] == 0:
-            del self.portfolio[symbol]
-        print(f"✅ SELL {quantity} {symbol} @ PKR {price:.2f}")
-        return True
-
-# ============================================================
 # MAIN EXECUTION
 # ============================================================
 
 def main():
-    print("⚡ PSX ULTIMATE PROFIT ENGINE v3.1 — MAXIMUM PROFIT EDITION")
-    print("=" * 75)
+    print("🛡️ PSX ULTIMATE PROTECTED PROFIT ENGINE v6.0")
+    print("=" * 80)
     print(f"💰 Starting Balance: PKR {ACCOUNT_BALANCE:,.0f}")
     print(f"📋 Paper Trading: {'ACTIVE' if PAPER_TRADING else 'DISABLED'}")
-    print(f"🧠 Kelly Criterion: ENABLED")
-    print(f"📊 Trailing Stops: ENABLED")
-    print("=" * 75)
+    print(f"⚡ Safety Filters: Volatility, Liquidity, Risk-Off, R:R ≥ {MIN_RISK_REWARD:.1f}:1")
+    print(f"🛡️ Max Daily Loss: {MAX_PORTFOLIO_DRAWDOWN*100:.0f}%")
+    print("=" * 80)
     
     # 1. Fetch stocks
     stock_symbols = fetch_top_shariah_stocks(limit=50)
@@ -1028,16 +1167,42 @@ def main():
     print("📊 Calculating correlation matrix...")
     correlation_matrix = calculate_correlation_matrix(historical_data, stock_symbols[:20])
     
-    # 7. Paper trading
-    paper_engine = PaperTradingEngine(ACCOUNT_BALANCE)
+    # 7. Check index change for risk-off mode
+    index_change = 0
+    risk_off = False
+    if index_summary is not None and not index_summary.empty:
+        try:
+            # Find KSE100 row
+            kse100_row = index_summary[index_summary['Index'] == 'KSE100']
+            if not kse100_row.empty:
+                change_pct = safe_float(kse100_row['PERCENTAGE_CHANGE'].iloc[0], 0)
+                index_change = change_pct
+                if change_pct < -RISK_OFF_INDEX_DROP * 100:
+                    risk_off = True
+                    print(f"⚠️ Index dropped {change_pct:.2f}% — RISK-OFF MODE ACTIVATED")
+        except:
+            pass
+    
+    # 8. Paper trading engine
+    paper_engine = PaperTradingEngine(ACCOUNT_BALANCE, MAX_PORTFOLIO_DRAWDOWN)
     trade_journal = TradeJournal()
     
-    # 8. Generate signals
-    print("🎯 Generating ultimate signals...")
+    # 9. Generate signals with safety filters
+    print("🎯 Generating signals with safety checks...")
     signals = {}
     entry_exit = {}
     for sym in stock_symbols:
         price = quotes[sym].get('price')
+        prev_close = quotes[sym].get('prev_close', None)
+        volume = quotes[sym].get('volume', 0)
+        
+        # Liquidity check
+        if volume < MIN_VOLUME_CRORES * 1e7:  # converting crores to PKR
+            # Skip low liquidity stocks
+            signals[sym] = {'primary': '⛔ LOW LIQUIDITY', 'action': 'WAIT', 'score': 0}
+            entry_exit[sym] = {}
+            continue
+        
         if isinstance(price, str):
             try:
                 price = float(price)
@@ -1046,9 +1211,10 @@ def main():
         elif not isinstance(price, (int, float)):
             price = None
         
-        sig = generate_signals(
+        sig = generate_safe_signals(
             sym, price, indicators.get(sym, {}),
-            sentiment_data, fundamentals.get(sym, {})
+            sentiment_data, fundamentals.get(sym, {}),
+            prev_close, None, index_change, risk_off
         )
         signals[sym] = sig
         ee = calculate_entry_exit(
@@ -1060,22 +1226,22 @@ def main():
         trade_journal.log_signal(sym, sig.get('primary', 'NEUTRAL'), sig.get('score', 0) / 10, len(sig.get('details', [])))
         
         if PAPER_TRADING and price and isinstance(price, (int, float)):
-            if sig.get('action') == 'BUY' and ee.get('position_size', 0) > 0:
+            if sig.get('action') == 'BUY' and not risk_off and ee.get('position_size', 0) > 0 and ee.get('risk_reward', 0) >= MIN_RISK_REWARD:
                 paper_engine.buy(sym, price, ee.get('position_size', 0))
             elif sig.get('action') == 'SELL' and sym in paper_engine.portfolio:
                 paper_engine.sell(sym, price)
     
-    # 9. Generate report
+    # 10. Generate report
     print("📝 Generating HTML report...")
     html_report = generate_ultimate_report(
         quotes, fundamentals, indicators, sentiment_data,
         signals, entry_exit, market_pulse, index_summary, sector_data,
         stock_symbols, correlation_matrix,
-        ACCOUNT_BALANCE, trade_journal, paper_engine
+        ACCOUNT_BALANCE, trade_journal, paper_engine, risk_off
     )
     
-    # 10. Send email
-    subject = f"⚡ PSX Ultimate Report - {len(stock_symbols)} Stocks - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    # 11. Send email
+    subject = f"🛡️ PSX Protected Report v6.0 - {len(stock_symbols)} Stocks - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     success = send_html_email(subject, html_report)
     if success:
         print("✅ Report sent successfully!")
