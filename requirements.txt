@@ -6,3 +6,5 @@ numpy
 feedparser
 textblob
 scikit-learn
+TA-Lib
+tensorflow
