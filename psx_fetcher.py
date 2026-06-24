@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v8.1 — MORE FLEXIBLE
-Features: Relaxed Filters, Dividend Priority, Imminent Dividend Entry
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v9.0 — FORCE ENTRY
+For high-yield dividends (≥6%) with imminent ex-date (≤2 days), force entry
 """
 
 import requests
@@ -27,9 +27,6 @@ MAX_PORTFOLIO_DRAWDOWN = 0.02
 STOP_LOSS_PCT = 0.03
 TARGET1_PCT = 0.05
 TARGET2_PCT = 0.08
-MIN_DIVIDEND_YIELD = 0.04
-MIN_VOLUME_CRORES = 1  # Relaxed from 2 to 1 crore
-RISK_OFF_INDEX_DROP = 0.015
 PAPER_TRADING = True
 # ============================================================
 
@@ -67,9 +64,6 @@ def df_to_html(df, limit=10):
         return "<p>No data available</p>"
     df = df.head(limit)
     return df.to_html(index=False, border=0, classes='data-table')
-
-def is_valid_ticker(symbol):
-    return symbol in [s["symbol"] for s in DIVIDEND_STOCKS]
 
 def safe_float(val, default=0.0):
     try:
@@ -138,20 +132,6 @@ def fetch_fundamentals(symbol):
     except Exception as e:
         return {'symbol': symbol, 'error': str(e)}
 
-def fetch_historical(symbol, days=60):
-    try:
-        import pypsx
-        ticker = pypsx.PSXTicker(symbol)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        df = ticker.get_historical(
-            start_date=start_date.strftime("%Y-%m-%d"),
-            end_date=end_date.strftime("%Y-%m-%d")
-        )
-        return df
-    except Exception as e:
-        return None
-
 def fetch_market_pulse():
     try:
         import pypsx
@@ -179,120 +159,6 @@ def fetch_sector_performance():
         return sectors
     except Exception as e:
         return None
-
-def calculate_indicators(df):
-    if df is None or df.empty:
-        return {}
-    close_col = None
-    for col in df.columns:
-        if 'close' in col.lower() or 'adj close' in col.lower():
-            close_col = col
-            break
-    if close_col is None:
-        close_col = df.columns[3] if len(df.columns) > 3 else df.columns[0]
-    close = pd.Series(df[close_col].values)
-    indicators = {}
-    try:
-        indicators['sma_20'] = close.tail(20).mean() if len(close) >= 20 else None
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        indicators['rsi'] = 100 - (100 / (1 + rs)).iloc[-1] if len(rs) > 0 else None
-    except:
-        indicators['sma_20'] = None
-        indicators['rsi'] = None
-    return indicators
-
-# ============================================================
-# ULTIMATE DIVIDEND CAPTURE SIGNAL (RELAXED FILTERS)
-# ============================================================
-
-def generate_dividend_signal(symbol, price, stock_info, indicators, quote):
-    """
-    Generate dividend capture signal with relaxed filters.
-    Dividend priority: If yield > 6% or ex-date <= 2 days, relax filters.
-    """
-    if price <= 0 or not stock_info:
-        return None
-    
-    div_amount = stock_info.get("amount", 0)
-    ex_date = stock_info.get("ex_date", "")
-    days_until = stock_info.get("days_until", 10)
-    yield_pct = (div_amount / price) * 100
-    
-    # Check if this is a high-priority dividend
-    high_priority = yield_pct >= 6 or days_until <= 2
-    
-    # Safety filters - relaxed for high priority
-    if high_priority:
-        # Relaxed filters for high-priority dividends
-        filters = {
-            'min_yield': yield_pct >= 3.5,  # Relaxed from 4%
-            'volume_ok': quote.get('volume', 0) >= 0.5 * 1e7,  # Relaxed from 1 crore
-            'sma_ok': True,  # Remove SMA filter for high priority
-            'rsi_ok': indicators.get('rsi') is None or (25 <= indicators.get('rsi', 50) <= 75),  # Relaxed RSI
-            'timing_ok': 1 <= days_until <= 7,  # Expanded window
-        }
-    else:
-        # Standard filters
-        filters = {
-            'min_yield': yield_pct >= MIN_DIVIDEND_YIELD * 100,
-            'volume_ok': quote.get('volume', 0) >= MIN_VOLUME_CRORES * 1e7,
-            'sma_ok': indicators.get('sma_20') is None or price >= indicators.get('sma_20', 0) * 0.95,
-            'rsi_ok': indicators.get('rsi') is None or (30 <= indicators.get('rsi', 50) <= 70),
-            'timing_ok': 1 <= days_until <= 5,
-        }
-    
-    if not all(filters.values()):
-        failed_filters = [k for k, v in filters.items() if not v]
-        return {
-            'symbol': symbol,
-            'entry_price': price,
-            'ex_date': ex_date,
-            'div_amount': div_amount,
-            'yield_pct': yield_pct,
-            'days_until': days_until,
-            'action': 'HOLD',
-            'reason': f"Filters failed: {', '.join(failed_filters)}",
-            'filters': filters,
-            'high_priority': high_priority
-        }
-    
-    # Calculate position size
-    shares = int(ACCOUNT_BALANCE * 0.95 / price)
-    stop_loss = price * (1 - STOP_LOSS_PCT)
-    target1 = price * (1 + TARGET1_PCT)
-    target2 = price * (1 + TARGET2_PCT)
-    
-    risk = price - stop_loss
-    reward1 = target1 - price
-    reward2 = target2 - price
-    rr1 = reward1 / risk if risk > 0 else 0
-    rr2 = reward2 / risk if risk > 0 else 0
-    
-    priority_label = "⭐ HIGH PRIORITY" if high_priority else ""
-    
-    return {
-        'symbol': symbol,
-        'entry_price': price,
-        'stop_loss': round(stop_loss, 2),
-        'target1': round(target1, 2),
-        'target2': round(target2, 2),
-        'shares': shares,
-        'ex_date': ex_date,
-        'div_amount': div_amount,
-        'yield_pct': yield_pct,
-        'days_until': days_until,
-        'entry_day': f"T-{max(0, days_until - 1)}",
-        'exit_day': "T+3",
-        'risk_reward1': round(rr1, 2),
-        'risk_reward2': round(rr2, 2),
-        'action': 'BUY',
-        'priority': priority_label,
-        'filters': filters,
-        'reason': 'All filters passed' + (f" [{priority_label}]" if high_priority else "")
-    }
 
 # ============================================================
 # SENTIMENT ANALYSIS
@@ -329,6 +195,85 @@ def fetch_sentiment():
         overall = 'bullish' if avg_polarity > 0.05 else 'bearish' if avg_polarity < -0.05 else 'neutral'
         return {'overall': overall, 'avg_polarity': avg_polarity, 'articles': articles[:10]}
     return {'overall': 'neutral', 'avg_polarity': 0, 'articles': []}
+
+# ============================================================
+# FORCE ENTRY DIVIDEND CAPTURE SIGNAL
+# ============================================================
+
+def generate_dividend_signal(symbol, price, stock_info, quote):
+    """
+    FORCE ENTRY for high-yield dividends (>=6%) with imminent ex-date (<=2 days).
+    Also provides standard entry for other dividend opportunities.
+    """
+    if price <= 0 or not stock_info:
+        return None
+    
+    div_amount = stock_info.get("amount", 0)
+    ex_date = stock_info.get("ex_date", "")
+    days_until = stock_info.get("days_until", 10)
+    yield_pct = (div_amount / price) * 100 if price > 0 else 0
+    
+    # Determine if this is a FORCE ENTRY candidate
+    force_entry = (yield_pct >= 6 and days_until <= 2) or (yield_pct >= 8 and days_until <= 4)
+    
+    # Calculate position size
+    shares = int(ACCOUNT_BALANCE * 0.95 / price)
+    stop_loss = price * (1 - STOP_LOSS_PCT)
+    target1 = price * (1 + TARGET1_PCT)
+    target2 = price * (1 + TARGET2_PCT)
+    
+    risk = price - stop_loss
+    reward1 = target1 - price
+    reward2 = target2 - price
+    rr1 = reward1 / risk if risk > 0 else 0
+    rr2 = reward2 / risk if risk > 0 else 0
+    
+    if force_entry:
+        return {
+            'symbol': symbol,
+            'entry_price': price,
+            'stop_loss': round(stop_loss, 2),
+            'target1': round(target1, 2),
+            'target2': round(target2, 2),
+            'shares': shares,
+            'ex_date': ex_date,
+            'div_amount': div_amount,
+            'yield_pct': yield_pct,
+            'days_until': days_until,
+            'entry_day': f"T-{max(0, days_until - 1)}",
+            'exit_day': "T+3",
+            'risk_reward1': round(rr1, 2),
+            'risk_reward2': round(rr2, 2),
+            'action': 'BUY',
+            'priority': '⭐ FORCE ENTRY',
+            'reason': f'High yield ({yield_pct:.1f}%) + Imminent ex-date',
+            'force_entry': True
+        }
+    
+    # Standard entry: yield >= 4% and days_until between 2-5
+    if yield_pct >= 4 and 2 <= days_until <= 5:
+        return {
+            'symbol': symbol,
+            'entry_price': price,
+            'stop_loss': round(stop_loss, 2),
+            'target1': round(target1, 2),
+            'target2': round(target2, 2),
+            'shares': shares,
+            'ex_date': ex_date,
+            'div_amount': div_amount,
+            'yield_pct': yield_pct,
+            'days_until': days_until,
+            'entry_day': f"T-{max(0, days_until - 1)}",
+            'exit_day': "T+3",
+            'risk_reward1': round(rr1, 2),
+            'risk_reward2': round(rr2, 2),
+            'action': 'BUY',
+            'priority': '🟢 STANDARD',
+            'reason': f'Yield {yield_pct:.1f}%, ex-date in {days_until} days',
+            'force_entry': False
+        }
+    
+    return None
 
 # ============================================================
 # TRADE JOURNAL & PAPER TRADING
@@ -449,7 +394,6 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
     
     # Trade signals
     buy_signals = [s for s in signals if s and s.get('action') == 'BUY']
-    hold_signals = [s for s in signals if s and s.get('action') == 'HOLD']
     
     journal = trade_journal.get_summary() if trade_journal else {}
     journal_total_trades = journal.get('total_trades', 0)
@@ -499,14 +443,15 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
             .risk-off {{ background: #ff4444; color: white; padding: 2px 8px; border-radius: 12px; }}
             .risk-on {{ background: #00ff88; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; }}
             .priority-badge {{ background: #ffaa00; color: #0a0a0a; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
+            .force-entry {{ background: #ff4444; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>💰 ULTIMATE DIVIDEND CAPTURE ENGINE v8.1</h1>
+            <h1>💰 ULTIMATE DIVIDEND CAPTURE ENGINE v9.0</h1>
             <p>Generated on {now}</p>
             <p>💰 Account: PKR {account_balance:,.0f} | 📊 {len(upcoming_dividends)} Upcoming Dividends</p>
-            <p>⚡ Monthly Cycle | Relaxed Filters | Priority Entry | Tiered Profit Taking</p>
+            <p>⚡ Monthly Cycle | FORCE ENTRY for High-Yield Imminent Dividends</p>
             <p>🛡️ Mode: {risk_off_badge} | Max Daily Loss: {MAX_PORTFOLIO_DRAWDOWN*100:.0f}%</p>
             <p>📈 Projected Monthly Return: {projected_monthly:.2f}% | Annual: {projected_annual:.2f}%</p>
         </div>
@@ -549,7 +494,7 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
 
         <div class="section highlight-box">
             <h2>🎯 Dividend Capture Trade Recommendations</h2>
-            <p><strong>Entry Filters (Relaxed):</strong> Yield ≥ 3.5% (Priority) or 4% (Standard) | Volume ≥ 0.5 Cr (Priority)</p>
+            <p><strong>FORCE ENTRY:</strong> Yield ≥ 6% + ex-date ≤ 2 days | <strong>Standard:</strong> Yield ≥ 4% + ex-date 2-5 days</p>
             <p><strong>Exit Strategy:</strong> Stop Loss (-3%) | Target1 (+5%, sell 50%) | Target2 (+8%, sell 50%)</p>
             <table>
                 <thead>
@@ -572,7 +517,7 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
     """
     if buy_signals:
         for signal in buy_signals[:10]:
-            priority_badge = f"<span class='priority-badge'>{signal.get('priority', '')}</span>" if signal.get('priority') else ""
+            priority_badge = f"<span class='{'force-entry' if signal.get('force_entry') else 'priority-badge'}'>{signal.get('priority', '')}</span>"
             html += f"""
                         <tr class="signal-buy">
                             <td><strong>{signal.get('symbol', 'N/A')}</strong></td>
@@ -636,10 +581,10 @@ def generate_dividend_report(quotes, fundamentals, market_pulse, index_summary, 
 
         <div class="footer">
             <p>🕌 All stocks Shariah-compliant (KMI All Share Index)</p>
-            <p>🛡️ Safety Filters: Yield ≥ 3.5-4% | Volume ≥ 0.5-1 Cr | RSI 25-75 | Stop-Loss -3%</p>
-            <p>💰 Tiered Profit Taking: 50% at +5%, 50% at +8%</p>
+            <p>🛡️ FORCE ENTRY: Yield ≥ 6% + ex-date ≤ 2 days | Standard: Yield ≥ 4% + ex-date 2-5 days</p>
+            <p>💰 Tiered Profit Taking: 50% at +5%, 50% at +8% | Stop-Loss: -3%</p>
             <p>⚠️ No trading system eliminates risk. Always do your own research.</p>
-            <p>⚡ Generated by PSX Ultimate Dividend Capture Engine v8.1</p>
+            <p>⚡ Generated by PSX Ultimate Dividend Capture Engine v9.0</p>
         </div>
     </body>
     </html>
@@ -679,11 +624,11 @@ def send_html_email(subject, html_body):
 # ============================================================
 
 def main():
-    print("💰 ULTIMATE DIVIDEND CAPTURE ENGINE v8.1")
+    print("💰 ULTIMATE DIVIDEND CAPTURE ENGINE v9.0 — FORCE ENTRY")
     print("=" * 80)
     print(f"💰 Starting Balance: PKR {ACCOUNT_BALANCE:,.0f}")
     print(f"📋 Paper Trading: {'ACTIVE' if PAPER_TRADING else 'DISABLED'}")
-    print(f"⚡ Strategy: Dividend Capture | Relaxed Filters | Priority Entry")
+    print(f"⚡ Strategy: FORCE ENTRY for high-yield imminent dividends")
     print(f"🛡️ Stop-Loss: {STOP_LOSS_PCT*100:.0f}% | Max Daily Loss: {MAX_PORTFOLIO_DRAWDOWN*100:.0f}%")
     print("=" * 80)
     
@@ -692,16 +637,14 @@ def main():
     upcoming_dividends, all_dividends = fetch_dividend_calendar()
     print(f"   Upcoming dividends: {len(upcoming_dividends)}")
     
-    # 2. Fetch data
+    # 2. Fetch stock data
     print("📡 Fetching stock data...")
     quotes = {}
     fundamentals = {}
-    historical = {}
     for stock in all_dividends:
         symbol = stock['symbol']
         quotes[symbol] = fetch_quote(symbol)
         fundamentals[symbol] = fetch_fundamentals(symbol)
-        historical[symbol] = fetch_historical(symbol)
     
     # 3. Market data
     market_pulse = fetch_market_pulse()
@@ -715,7 +658,7 @@ def main():
             kse100_row = index_summary[index_summary['Index'] == 'KSE100']
             if not kse100_row.empty:
                 change_pct = safe_float(kse100_row['PERCENTAGE_CHANGE'].iloc[0], 0)
-                if change_pct < -RISK_OFF_INDEX_DROP * 100:
+                if change_pct < -1.5:
                     risk_off = True
                     print(f"⚠️ Index dropped {change_pct:.2f}% — RISK-OFF MODE ACTIVATED")
         except:
@@ -725,8 +668,8 @@ def main():
     print("📰 Fetching news sentiment...")
     sentiment_data = fetch_sentiment()
     
-    # 6. Generate signals
-    print("🎯 Generating dividend capture signals with relaxed filters...")
+    # 6. Generate signals with FORCE ENTRY
+    print("🎯 Generating dividend capture signals with FORCE ENTRY...")
     signals = []
     for stock in upcoming_dividends:
         symbol = stock['symbol']
@@ -741,8 +684,7 @@ def main():
             price = 0
         
         if price > 0:
-            ind = calculate_indicators(historical.get(symbol))
-            signal = generate_dividend_signal(symbol, price, stock, ind, quote)
+            signal = generate_dividend_signal(symbol, price, stock, quote)
             if signal:
                 signals.append(signal)
     
@@ -761,6 +703,7 @@ def main():
             target2 = signal.get('target2', 0)
             if PAPER_TRADING and price > 0 and shares > 0:
                 paper_engine.buy(symbol, price, shares, stop_loss, target1, target2)
+                print(f"✅ EXECUTED: BUY {shares} {symbol} @ PKR {price:.2f} | Stop: {stop_loss} | T1: {target1} | T2: {target2}")
     
     # 9. Generate report
     print("📝 Generating ultimate dividend capture report...")
@@ -771,7 +714,7 @@ def main():
     )
     
     # 10. Send email
-    subject = f"💰 Dividend Capture Report v8.1 - {len(upcoming_dividends)} Upcoming - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    subject = f"💰 Dividend Capture Report v9.0 - {len(upcoming_dividends)} Upcoming - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     success = send_html_email(subject, html_report)
     if success:
         print("✅ Report sent successfully!")
