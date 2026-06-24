@@ -5,3 +5,4 @@ pandas
 numpy
 feedparser
 textblob
+scikit-learn
