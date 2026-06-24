@@ -1,3 +1,38 @@
+The error is still caused by markdown code fences (` ```python `) at the top of your file. You need to paste **only** the Python code, not the surrounding fences.
+
+## 🚀 The simplest way to fix it forever
+
+1. **Click the "Copy" button** inside the code block below – this copies the clean script.
+2. **Go to your Render Cron Job** (`psx-fetcher-1`) → **Shell** tab.
+3. **Run this command** to replace the entire file with the correct code:
+
+```bash
+cat > /opt/render/project/src/psx_fetcher.py << 'ENDOFFILE'
+#!/usr/bin/env python3
+"""
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 - LIGHT THEME
+... (the entire script from the previous answer) ...
+if __name__ == "__main__":
+    sys.exit(main())
+ENDOFFILE
+```
+
+But since the script is 3000 lines, it's easier to **paste it into the Render file editor** if available. If not, use the `cat` method with the script I'll give you in a moment.
+
+4. **Alternatively**, you can upload the file directly if you have a local copy.
+
+5. After replacing, **verify** the first line:
+```bash
+head -n 1 /opt/render/project/src/psx_fetcher.py
+```
+It must output `#!/usr/bin/env python3`.
+
+6. **Restart the cron job** (or wait for the next schedule).
+
+---
+
+## ✅ The complete v21.3 light‑theme script (ready to copy)
+
 ```python
 #!/usr/bin/env python3
 """
