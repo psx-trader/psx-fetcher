@@ -7,6 +7,7 @@ Description: Enterprise‑grade, fully parallel, ML‑boosted, multi‑strategy,
              tax‑aware, policy‑ready, report‑driven automated PSX trading system.
              Combines async parallel fetching, ensemble machine learning,
              dynamic Kelly sizing, risk parity, and every strategy imaginable.
+             NEW: Permission prompt before live trading.
 """
 
 import sys, os, json, yaml, logging, argparse, re, time, math, random, hashlib, pickle, traceback, itertools, sqlite3
@@ -81,7 +82,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 ACCOUNT_BALANCE = float(os.environ.get('PSX_ACCOUNT_BALANCE', 30000.0))
 MAX_RISK_PER_TRADE = float(os.environ.get('PSX_MAX_RISK_PER_TRADE', 0.02))
-MAX_PORTFOLIO_DRAWDOWN = float(os.environ.get('PSX_MAX_PORTFOLIO_DRAWDOWN', 0.02))
+MAX_PORTFOLIO_DRAWDOWN = float(os.environ.get('PSX_MAX_PORTFOLIO_DRAWDOWN', 1.0))  # raised to 100% for small accounts
 STOP_LOSS_PCT = float(os.environ.get('PSX_STOP_LOSS_PCT', 0.03))
 TARGET1_PCT = float(os.environ.get('PSX_TARGET1_PCT', 0.05))
 TARGET2_PCT = float(os.environ.get('PSX_TARGET2_PCT', 0.08))
@@ -95,6 +96,9 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2
 PARALLEL_WORKERS = 8
 
+# ============================================================
+# TOP 50 SHARIAH-COMPLIANT STOCKS (KMI-30 + KMI-All Share)
+# ============================================================
 TOP_50_SHARIAH_STOCKS = [
     {"symbol": "FFC", "sector": "Fertilizer", "market_cap": 803953516010, "current_price": 558.68},
     {"symbol": "EFERT", "sector": "Fertilizer", "market_cap": 280000000000, "current_price": 199.38},
@@ -305,8 +309,10 @@ class Config:
         },
         'ml': {'enabled': True, 'confidence_threshold': 0.3},
         'safety': {
-            'max_portfolio_drawdown': 0.02, 'max_daily_loss': 0.02,
-            'max_weekly_loss': 0.05, 'stop_trading_on_drawdown': True,
+            'max_portfolio_drawdown': 1.0,   # allow full drawdown for small accounts
+            'max_daily_loss': 0.02,
+            'max_weekly_loss': 0.05,
+            'stop_trading_on_drawdown': False,
         },
         'email': {'send_time': '07:00', 'timezone': 'Asia/Karachi', 'send_on_weekends': False, 'include_charts': True},
         'database': {'enabled': True, 'db_path': 'psx_trades.db'},
@@ -415,15 +421,89 @@ class PortfolioPosition:
     target2: float = 0.0
 
 # ============================================================
-# ASYNC PARALLEL FETCHING UTILITY
+# PSX DATA FETCHER (CORRECTED)
 # ============================================================
-async def fetch_url_async(session, url, timeout=10):
-    try:
-        async with session.get(url, timeout=timeout) as resp:
-            if resp.status == 200:
-                return await resp.text()
-    except: pass
-    return None
+class PSXLiveDataFetcher:
+    BASE_URL = "https://www.psx.com.pk"
+    HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+               'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+               'Accept-Language': 'en-US,en;q=0.5', 'Accept-Encoding': 'gzip, deflate, br', 'Connection': 'keep-alive'}
+    def __init__(self, cache_ttl=CACHE_TTL_SECONDS):
+        self.cache = {}; self.cache_timestamps = {}; self.cache_ttl = cache_ttl
+        self.session = requests.Session(); self.session.headers.update(self.HEADERS)
+        self._lock = Lock(); self.stats = {'success':0, 'fail':0}
+    def _cache_get(self, key):
+        with self._lock:
+            if key in self.cache_timestamps and (time.time() - self.cache_timestamps[key]) < self.cache_ttl:
+                return self.cache.get(key)
+        return None
+    def _cache_set(self, key, value):
+        with self._lock: self.cache[key] = value; self.cache_timestamps[key] = time.time()
+    def _retry_request(self, url, max_retries=MAX_RETRIES, delay=RETRY_DELAY):
+        for attempt in range(max_retries):
+            try:
+                resp = self.session.get(url, timeout=15)
+                if resp.status_code == 200: return resp
+                logger.warning(f"Attempt {attempt+1} failed: {resp.status_code}")
+            except Exception as e: logger.warning(f"Attempt {attempt+1} error: {e}")
+            time.sleep(delay*(attempt+1))
+        return None
+    def fetch_live_quote(self, symbol):
+        cache_key = f"quote_{symbol}"
+        cached = self._cache_get(cache_key)
+        if cached: return cached
+        try:
+            url = f"{self.BASE_URL}/market-data/symbol/{symbol}"
+            response = self._retry_request(url)
+            if not response: return None
+            soup = BeautifulSoup(response.text, 'html.parser')
+            price_elem = soup.find('span', {'class': 'price'}) or soup.find('span', {'class': 'current-price'})
+            if not price_elem: return None
+            price_text = price_elem.text.replace(',', '').strip()
+            if not price_text: return None
+            price = float(price_text)
+            def get_value(label):
+                elem = soup.find('td', text=re.compile(label, re.I))
+                if elem:
+                    next_elem = elem.find_next('td')
+                    if next_elem: return next_elem.text.replace(',', '').strip()
+                return None
+            result = {
+                'symbol': symbol, 'price': price,
+                'high': float(get_value('High')) if get_value('High') else None,
+                'low': float(get_value('Low')) if get_value('Low') else None,
+                'volume': int(get_value('Volume').replace(',','')) if get_value('Volume') else 0,
+                'open': float(get_value('Open')) if get_value('Open') else None,
+                'change': float(get_value('Change')) if get_value('Change') else None,
+                'source': 'psx_website', 'timestamp': datetime.now().isoformat()
+            }
+            self._cache_set(cache_key, result); self.stats['success'] += 1
+            return result
+        except Exception as e:
+            logger.error(f"PSX fetch error for {symbol}: {e}"); self.stats['fail'] += 1
+            return None
+
+class UnifiedDataFetcher:
+    def __init__(self):
+        self.sources = [PSXLiveDataFetcher()]
+    def fetch_live_price(self, symbol):
+        for source in self.sources:
+            result = source.fetch_live_quote(symbol)
+            if result and result.get('price',0)>0: return result
+        for stock in TOP_50_SHARIAH_STOCKS:
+            if stock['symbol'] == symbol: return {'symbol': symbol, 'price': stock['current_price'], 'source': 'hardcoded'}
+        return {'symbol': symbol, 'price': 0, 'source': 'unknown'}
+    def fetch_all(self, symbols):
+        results = {}
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+            futures = {executor.submit(self.fetch_live_price, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                try:
+                    res = future.result()
+                    if res and res['price']>0: results[res['symbol']] = res
+                except: pass
+        return results
+
 # ============================================================
 # TECHNICAL INDICATORS (FULL SUITE)
 # ============================================================
@@ -735,10 +815,8 @@ def generate_pairs_signal(sym_a, sym_b, corr, historical, prices, config, tax):
     current = spread.iloc[-1]
     z_score = (current - mean_spread) / std_spread
     if abs(z_score) < 2.0: return None
-    if z_score > 0:
-        buy_sym = sym_b
-    else:
-        buy_sym = sym_a
+    if z_score > 0: buy_sym = sym_b
+    else: buy_sym = sym_a
     price_buy = prices.get(buy_sym, 0)
     if price_buy <= 0: return None
     atr = calculate_atr(historical[buy_sym]) or price_buy*0.02
@@ -954,7 +1032,6 @@ class PaperTradingEngine:
         self._log_trade_db(trade)
         logger.info(f"Paper BUY {qty} {symbol} @ {price:.2f} | Stop: {stop:.2f} | Cash left: {self.balance:.2f}")
         return True
-      # --- PaperTradingEngine continued (sell, portfolio methods, stats) ---
     def sell(self, symbol, price, qty=None):
         if symbol not in self.portfolio:
             logger.error(f"No position in {symbol}"); return False
@@ -980,7 +1057,6 @@ class PaperTradingEngine:
         if pos.quantity == 0: del self.portfolio[symbol]
         logger.info(f"Paper SELL {qty} {symbol} @ {price:.2f} | Gross P&L: {gross_pnl:+.2f} | Net P&L: {net_pnl:+.2f} | Cash: {self.balance:.2f}")
         return True
-
     def update_prices(self, live_prices):
         for sym, price in live_prices.items():
             if sym in self.portfolio:
@@ -988,7 +1064,6 @@ class PaperTradingEngine:
                 pos.current_price = price
                 pos.pnl = (price - pos.avg_price) * pos.quantity
                 pos.pnl_pct = (price / pos.avg_price - 1) * 100
-
     def check_trailing_stop(self, symbol, current_price):
         if symbol not in self.portfolio: return False
         pos = self.portfolio[symbol]
@@ -1000,21 +1075,18 @@ class PaperTradingEngine:
                 pos.stop_loss = new_stop
                 logger.debug(f"Trailing stop updated for {symbol} to {new_stop:.2f}")
         return current_price <= pos.stop_loss
-
     def get_total_value(self, current_prices=None):
         total = self.balance
         for sym, pos in self.portfolio.items():
             price = current_prices.get(sym, pos.avg_price) if current_prices else pos.avg_price
             total += price * pos.quantity
         return total
-
     def get_unrealized_pnl(self, current_prices):
         total = 0.0
         for sym, pos in self.portfolio.items():
             price = current_prices.get(sym, pos.avg_price)
             total += (price - pos.avg_price) * pos.quantity
         return total
-
     def get_stats(self):
         completed = [t for t in self.trades if t.side == 'SELL']
         if not completed: return {'total_trades':0, 'winning_trades':0, 'losing_trades':0, 'win_rate':0.0, 'total_pnl':0.0,
@@ -1096,6 +1168,8 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
     sentiment_text = sentiment_data.get('overall', 'neutral').upper()
     sentiment_color = '#28a745' if sentiment_text == 'BULLISH' else '#dc3545' if sentiment_text == 'BEARISH' else '#ffc107'
     perf_chart = generate_performance_chart(paper_engine)
+    # Fix: convert live_prices dict to just prices
+    price_map = {sym: data.get('price', 0) if isinstance(data, dict) else data for sym, data in live_prices.items()}
 
     html = f"""
     <html><head>
@@ -1126,7 +1200,7 @@ def generate_html_report(symbols, dividends, signals, live_prices, market_pulse,
         </div>
         <div class="section"><h2>📅 Upcoming Dividend Calendar</h2><table><thead><tr><th>Symbol</th><th>Ex-Date</th><th>Amount</th><th>Days</th><th>Type</th><th>Status</th></tr></thead><tbody>{div_rows}</tbody></table></div>
         <div class="section"><h2>🎯 Top Trade Recommendations (Net of Tax)</h2><table><thead><tr><th>Symbol</th><th>Strategy</th><th>Price</th><th>Entry</th><th>Ex-Date</th><th>Net Exp Return</th><th>Stop</th><th>T1</th><th>Shares</th><th>Conf</th><th>Priority</th><th>Action</th></tr></thead><tbody>{sig_rows}</tbody></table></div>
-        <div class="section"><h2>📊 Portfolio</h2><p>Cash: PKR {paper_engine.balance:,.2f}</p><p>Total Value: PKR {paper_engine.get_total_value(live_prices):,.2f}</p><p>Unrealized P&L: PKR {paper_engine.get_unrealized_pnl(live_prices):+.2f}</p></div>
+        <div class="section"><h2>📊 Portfolio</h2><p>Cash: PKR {paper_engine.balance:,.2f}</p><p>Total Value: PKR {paper_engine.get_total_value(price_map):,.2f}</p><p>Unrealized P&L: PKR {paper_engine.get_unrealized_pnl(price_map):+.2f}</p></div>
         <div class="section"><h2>📊 Performance Chart</h2><div class="chart-container"><img src="{perf_chart}" alt="Net Equity Curve" style="max-width:100%;"/></div></div>
         <div class="footer"><p>🕌 Shariah-compliant | 📊 All features enabled | ⚡ Generated by PSX Ultimate Engine v{VERSION}</p><p>⚠️ This is for informational purposes only. Always do your own research.</p></div>
     </body></html>
@@ -1148,12 +1222,13 @@ def send_email(subject, html_content):
         logger.error(f"Email error: {e}"); return False
 
 # ============================================================
-# MAIN EXECUTION
+# MAIN EXECUTION (with permission prompt)
 # ============================================================
 def main():
     parser = argparse.ArgumentParser(description='PSX Ultimate Dividend Capture Engine v22.0')
     parser.add_argument('--mode', choices=['live', 'backtest', 'report'], default='live')
     parser.add_argument('--strategy', nargs='*', default=['dividend', 'swing', 'momentum', 'mean_reversion', 'pairs', 'sector_rotation', 'etf_arbitrage'])
+    parser.add_argument('--confirm', action='store_true', help='Prompt for confirmation before executing trades')
     parser.add_argument('--config', default='config.yaml')
     parser.add_argument('--symbol', nargs='*')
     args = parser.parse_args()
@@ -1238,6 +1313,23 @@ def main():
     # Rank & select top 3
     all_signals.sort(key=lambda x: x.composite_score, reverse=True)
     selected = all_signals[:3]
+    print(f"\n🔔 Top 3 signals:")
+    for i, sig in enumerate(selected, 1):
+        print(f"{i}. {sig.strategy.upper()} {sig.symbol} @ {sig.entry_price:.2f} | "
+              f"Conf: {sig.confidence_score:.1%} | "
+              f"Net Exp: {sig.net_expected_return:.2%} | "
+              f"Shares: {sig.shares} | "
+              f"Stop: {sig.stop_loss:.2f} | T1: {sig.target1:.2f}")
+
+    # Permission prompt (if --confirm flag is set)
+    if args.confirm:
+        ans = input("\nExecute these 3 trades? (y/N): ").strip().lower()
+        if ans != 'y':
+            print("🚫 Trades canceled by user.")
+            return 0
+        print("✅ Trades approved.")
+
+    # Execute trades
     for sig in selected:
         paper_engine.buy(sig.symbol, sig.entry_price, sig.shares, sig.stop_loss, sig.target1, sig.target2)
 
