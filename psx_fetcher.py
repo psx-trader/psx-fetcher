@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 - LIGHT THEME
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 – LIGHT THEME, CASH-AWARE PAPER TRADING
 Author: PSX Ultimate Engine
 License: Personal Use Only
 Description: Fully automated Shariah-compliant dividend capture and swing trading system for PSX.
 Features: Live data, 30+ indicators, ML ensemble (LR+RF+XGB+LSTM), sentiment analysis (VADER+TextBlob),
-          Kelly sizing, paper trading, backtesting, portfolio optimization, correlation analysis,
+          Kelly sizing, cash‑aware paper trading, backtesting, portfolio optimization, correlation analysis,
           risk management, telegram alerts, HTML email reports with light theme charts,
           YAML config, SQLite trade journal, scenario testing, walk-forward analysis, and full logging.
-Now includes psx-data-reader integration for historical data.
+Now includes psx-data-reader integration and a budget cap for small accounts.
 """
 
 import sys
@@ -1604,7 +1604,7 @@ def generate_signal(symbol: str, price: float, div_info: Dict, indicators: Dict,
     )
 
 # ============================================================
-# PAPER TRADING ENGINE (ENHANCED WITH TRAILING STOP, TAX, DB)
+# PAPER TRADING ENGINE (CASH-AWARE)
 # ============================================================
 class PaperTradingEngine:
     def __init__(self, balance=ACCOUNT_BALANCE, max_dd=MAX_PORTFOLIO_DRAWDOWN, db_path='psx_trades.db'):
@@ -1660,6 +1660,13 @@ class PaperTradingEngine:
             logger.error(f"DB log error: {e}")
     
     def buy(self, symbol, price, qty, stop, target1, target2):
+        # Cash-aware: cap shares to available balance
+        max_shares_from_cash = int(self.balance / (price * (1 + self.slippage_pct + self.commission_pct)))
+        qty = min(qty, max_shares_from_cash)
+        if qty <= 0:
+            logger.error(f"Insufficient balance for {symbol}: need at least 1 share, have {self.balance:.2f}")
+            return False
+        
         cost = price * qty * (1 + self.slippage_pct + self.commission_pct)
         if cost > self.balance:
             logger.error(f"Insufficient balance for {symbol}: need {cost:.2f}, have {self.balance:.2f}")
@@ -1692,7 +1699,7 @@ class PaperTradingEngine:
         )
         self.trades.append(trade)
         self._log_trade_db(trade)
-        logger.info(f"Paper BUY {qty} {symbol} @ {price:.2f} | Stop: {stop:.2f} | T1: {target1:.2f} | T2: {target2:.2f}")
+        logger.info(f"Paper BUY {qty} {symbol} @ {price:.2f} | Stop: {stop:.2f} | T1: {target1:.2f} | T2: {target2:.2f} | Cash left: {self.balance:.2f}")
         return True
     
     def sell(self, symbol, price, qty=None):
@@ -1731,7 +1738,7 @@ class PaperTradingEngine:
         
         if pos.quantity == 0:
             del self.portfolio[symbol]
-        logger.info(f"Paper SELL {qty} {symbol} @ {price:.2f} | P&L: {pnl:+.2f} ({pnl_pct:+.2f}%)")
+        logger.info(f"Paper SELL {qty} {symbol} @ {price:.2f} | P&L: {pnl:+.2f} ({pnl_pct:+.2f}%) | Cash: {self.balance:.2f}")
         return True
     
     def update_prices(self, live_prices: Dict[str, float]):
@@ -2318,7 +2325,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 80)
-    print("💰 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 - LIGHT THEME")
+    print("💰 PSX ULTIMATE DIVIDEND CAPTURE ENGINE v21.3 - LIGHT THEME, CASH-AWARE")
     print("=" * 80)
     
     config = Config(args.config)
