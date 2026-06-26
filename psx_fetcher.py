@@ -1,18 +1,22 @@
-The script works – it bought MARI and sent the email.  
-The only error left is that your file starts with ```` ```python ```` (the markdown code fence) instead of `#!/usr/bin/env python3`.
-
-**Fix it now:**  
-Open your `psx_fetcher.py` on Render, delete **everything**, and paste **only** the code below.  
-Copy from `#!/usr/bin/env python3` to the very last line – **no surrounding backticks**.
+The ultimate synthesis of both scripts is **v36.0 – APEX GALAXY SUPREME** – combining all performance, safety, and architectural improvements from both versions into a single, definitive, production‑ready file.
 
 ```python
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v34.0 – GALAXY SUPREME
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v36.0 – APEX GALAXY SUPREME
 Author: PSX Ultimate Engine
 License: MIT
-Description: Production‑grade, async‑ready, strictly typed automated PSX trading system.
-Requirements: pip install pydantic pydantic-settings httpx structlog tenacity pandas numpy feedparser textblob vaderSentiment
+
+Description:
+    The absolute ultimate production‑grade, async‑ready, strictly typed automated PSX trading system.
+    Merges all improvements from v34.0 (Galaxy Supreme) and v35.0 (Apex Enterprise):
+    - Zero‑trust boundaries, immutability (frozen TradeSignal), deterministic fundamentals.
+    - TTLCache for dividends, StrategyConfig for tunable thresholds, HTML escape.
+    - Robust NaN‑safe indicators, asyncio parallel historical fetching, self‑tests.
+    - Pydantic validation on all signals, KeyboardInterrupt graceful shutdown.
+
+Requirements:
+    pip install pydantic pydantic-settings httpx structlog tenacity pandas numpy feedparser vaderSentiment cachetools markupsafe
 """
 
 from __future__ import annotations
@@ -22,32 +26,40 @@ import asyncio
 import hashlib
 import logging
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Tuple
+from typing import Any, ClassVar
 
 import feedparser
 import httpx
 import numpy as np
 import pandas as pd
 import structlog
-from pydantic import BaseModel, Field, field_validator
+from cachetools import TTLCache
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 try:
+    from markupsafe import escape as html_escape
+except ImportError:
+    def html_escape(s: Any) -> str:
+        return str(s)
+
+try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    VADER_AVAILABLE = True
+    VADER_AVAILABLE: bool = True
 except ImportError:
     VADER_AVAILABLE = False
 
 try:
     import pypsx
-    PYPSX_AVAILABLE = True
+    PYPSX_AVAILABLE: bool = True
 except ImportError:
     PYPSX_AVAILABLE = False
 
 # ============================================================
-# LOGGING CONFIGURATION
+# LOGGING
 # ============================================================
 def setup_logging() -> None:
     structlog.configure(
@@ -56,7 +68,7 @@ def setup_logging() -> None:
             structlog.processors.add_log_level,
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
-            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -68,10 +80,10 @@ def setup_logging() -> None:
 logger = structlog.get_logger("psx.engine")
 
 # ============================================================
-# CONFIGURATION & SETTINGS
+# CONFIGURATION
 # ============================================================
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="PSX_")
+    model_config = SettingsConfigDict(env_prefix="PSX_", extra="ignore")
     account_balance: float = 30000.0
     max_risk_per_trade: float = 0.02
     max_portfolio_drawdown: float = 1.0
@@ -91,6 +103,25 @@ class Settings(BaseSettings):
     def div_tax_rate(self) -> float:
         return 0.15 if self.tax_filer else 0.20
 
+# ============================================================
+# STRATEGY CONFIGURATION (centralised thresholds)
+# ============================================================
+class StrategyConfig:
+    DIV_YIELD_HIGH: ClassVar[float] = 6.0
+    DIV_DAYS_CLOSE: ClassVar[int] = 2
+    DIV_YIELD_MED: ClassVar[float] = 4.0
+    DIV_DAYS_FAR: ClassVar[int] = 10
+    DIV_MIN_CONF: ClassVar[float] = 0.3
+    DIV_TGT1_PCT: ClassVar[float] = 0.05
+    DIV_TGT2_PCT: ClassVar[float] = 0.08
+    STOP_ATR_MULT: ClassVar[float] = 2.0
+    SWING_RSI_THRESH: ClassVar[float] = 40.0
+    SWING_STOCH_THRESH: ClassVar[float] = 20.0
+    MOMENTUM_ADX_THRESH: ClassVar[float] = 25.0
+    REVERSION_RSI_THRESH: ClassVar[float] = 30.0
+    REGIME_ADX_THRESH: ClassVar[float] = 25.0
+    REGIME_BULL_BUFFER: ClassVar[float] = 1.02
+    REGIME_BEAR_BUFFER: ClassVar[float] = 0.98
 
 # ============================================================
 # DATA MODELS
@@ -109,6 +140,7 @@ class DividendInfo(BaseModel):
     days_until: int = Field(ge=0)
 
 class TradeSignal(BaseModel):
+    model_config = ConfigDict(frozen=True)
     symbol: str
     strategy: str
     action: str
@@ -123,23 +155,37 @@ class TradeSignal(BaseModel):
 
     @field_validator("stop_loss")
     @classmethod
-    def stop_below_entry(cls, v: float, info: Any) -> float:
+    def stop_below_entry(cls, v: float, info: ValidationInfo) -> float:
         if "entry_price" in info.data and v >= info.data["entry_price"]:
-            raise ValueError("stop_loss must be below entry_price")
+            raise ValueError(f"stop_loss must be below entry_price")
         return v
 
-class PortfolioPosition(BaseModel):
-    symbol: str
-    qty: int = Field(ge=1)
-    avg_price: float = Field(gt=0)
-    stop: float = Field(gt=0)
-    t1: float = Field(gt=0)
-    t2: float = Field(gt=0)
-    entry_time: datetime = Field(default_factory=datetime.now)
+    @field_validator("target1")
+    @classmethod
+    def target_above_entry(cls, v: float, info: ValidationInfo) -> float:
+        if "entry_price" in info.data and v <= info.data["entry_price"]:
+            raise ValueError(f"target1 must be above entry_price")
+        return v
 
+    @field_validator("target2")
+    @classmethod
+    def target2_above_target1(cls, v: float, info: ValidationInfo) -> float:
+        if "target1" in info.data and v <= info.data["target1"]:
+            raise ValueError(f"target2 must be above target1")
+        return v
+
+@dataclass(slots=True)
+class PortfolioPosition:
+    symbol: str
+    qty: int
+    avg_price: float
+    stop: float
+    t1: float
+    t2: float
+    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 # ============================================================
-# UNIVERSE OF STOCKS
+# UNIVERSE OF STOCKS & DIVIDENDS
 # ============================================================
 TOP_50_SHARIAH_STOCKS: list[StockInfo] = [
     StockInfo(symbol="FFC", sector="Fertilizer", market_cap=803953516010, current_price=558.68),
@@ -226,7 +272,7 @@ class TaxPolicy:
         return gross_pnl * (1 - rate)
 
 # ============================================================
-# FUNDAMENTAL ANALYSIS (DETERMINISTIC)
+# FUNDAMENTAL ANALYSIS (deterministic)
 # ============================================================
 class FundamentalAnalyzer:
     @staticmethod
@@ -259,7 +305,7 @@ class FundamentalAnalyzer:
         return max(0.1, min(1.0, score))
 
 # ============================================================
-# TECHNICAL INDICATORS ENGINE
+# TECHNICAL INDICATORS (NaN-safe)
 # ============================================================
 class IndicatorEngine:
     @staticmethod
@@ -275,54 +321,64 @@ class IndicatorEngine:
 
         tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
         atr_14 = tr.rolling(14).mean()
-        atr_val = atr_14.iloc[-1] if len(atr_14) > 0 else 0.0
+        atr_val: float = 0.0
+        if not atr_14.empty and pd.notna(atr_14.iloc[-1]):
+            atr_val = float(atr_14.iloc[-1])
 
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi_val = 50.0
+        rsi_val: float = 50.0
         if len(gain) > 0:
             loss_val = loss.iloc[-1]
             gain_val = gain.iloc[-1]
-            if loss_val != 0:
-                rsi_val = 100 - (100 / (1 + gain_val / loss_val))
-            elif gain_val != 0:
+            if pd.notna(loss_val) and loss_val != 0 and pd.notna(gain_val):
+                rsi_val = float(100 - (100 / (1 + gain_val / loss_val)))
+            elif pd.notna(gain_val) and gain_val != 0:
                 rsi_val = 100.0
 
         plus_dm = high.diff()
         minus_dm = low.diff()
-        adx_val = 0.0
-        if not atr_14.empty and atr_14.iloc[-1] != 0:
+        adx_val: float = 0.0
+        if not atr_14.empty and pd.notna(atr_14.iloc[-1]) and atr_14.iloc[-1] != 0:
             plus_di = 100 * (plus_dm.rolling(14).mean() / atr_14)
             minus_di = 100 * (minus_dm.rolling(14).mean() / atr_14)
             dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)
             adx_series = dx.rolling(14).mean()
-            if len(adx_series) >= 14:
-                adx_val = adx_series.iloc[-1]
+            if len(adx_series) >= 14 and pd.notna(adx_series.iloc[-1]):
+                adx_val = float(adx_series.iloc[-1])
 
         sma50 = close.rolling(50).mean()
+        sma50_val: float = float(close.mean())
+        if len(sma50) > 0 and pd.notna(sma50.iloc[-1]):
+            sma50_val = float(sma50.iloc[-1])
+
         low_14 = low.rolling(14).min()
         high_14 = high.rolling(14).max()
-        stoch_k_val = 50.0
-        if len(high_14) > 0 and (high_14.iloc[-1] - low_14.iloc[-1]) != 0:
-            stoch_k_val = 100 * (close.iloc[-1] - low_14.iloc[-1]) / (high_14.iloc[-1] - low_14.iloc[-1])
+        stoch_k_val: float = 50.0
+        if len(high_14) > 0 and pd.notna(high_14.iloc[-1]) and pd.notna(low_14.iloc[-1]):
+            range_val = high_14.iloc[-1] - low_14.iloc[-1]
+            if range_val != 0 and pd.notna(close.iloc[-1]):
+                stoch_k_val = float(100 * (close.iloc[-1] - low_14.iloc[-1]) / range_val)
 
-        vol_ratio = 1.0
-        if len(vol) >= 20 and vol.tail(20).mean() > 0:
-            vol_ratio = vol.iloc[-1] / vol.tail(20).mean()
+        vol_ratio: float = 1.0
+        if len(vol) >= 20:
+            mean_vol = vol.tail(20).mean()
+            if pd.notna(mean_vol) and mean_vol > 0 and pd.notna(vol.iloc[-1]):
+                vol_ratio = float(vol.iloc[-1] / mean_vol)
 
         return {
-            "close": close.iloc[-1],
+            "close": float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else 0.0,
             "rsi": rsi_val,
             "adx": adx_val,
             "stoch_k": stoch_k_val,
             "atr": atr_val,
-            "sma_50": sma50.iloc[-1] if len(sma50) > 0 else close.mean(),
+            "sma_50": sma50_val,
             "vol_ratio": vol_ratio,
         }
 
 # ============================================================
-# MACHINE LEARNING MODEL
+# MACHINE LEARNING
 # ============================================================
 class AlphaModel:
     @staticmethod
@@ -354,7 +410,7 @@ def position_size(
     return max(0, int(risk_amount / risk_per_share))
 
 # ============================================================
-# STRATEGY ENGINE
+# STRATEGY ENGINE (using StrategyConfig)
 # ============================================================
 class StrategyEngine:
     @staticmethod
@@ -363,142 +419,147 @@ class StrategyEngine:
     ) -> TradeSignal | None:
         yield_pct = (div.amount / price) * 100 if price > 0 else 0.0
         days = div.days_until
-        if not ((yield_pct >= 6 and days <= 2) or (yield_pct >= 4 and 2 <= days <= 10)):
+        if not ((yield_pct >= StrategyConfig.DIV_YIELD_HIGH and days <= StrategyConfig.DIV_DAYS_CLOSE) or
+                (yield_pct >= StrategyConfig.DIV_YIELD_MED and StrategyConfig.DIV_DAYS_CLOSE <= days <= StrategyConfig.DIV_DAYS_FAR)):
             return None
 
         conf = 0.5
-        if yield_pct > 6: conf += 0.1
+        if yield_pct > StrategyConfig.DIV_YIELD_HIGH: conf += 0.1
         rsi_val = ind.get("rsi", 50)
         if rsi_val < 30: conf += 0.1
         elif rsi_val > 70: conf -= 0.1
         conf = max(0.0, min(1.0, conf))
-        if conf < 0.3: return None
+        if conf < StrategyConfig.DIV_MIN_CONF:
+            return None
 
         atr_val = ind.get("atr", price * 0.02)
-        stop = price - atr_val * 2
-        t1 = price * (1 + 0.05)
-        t2 = price * (1 + 0.08)
+        stop = price - atr_val * StrategyConfig.STOP_ATR_MULT
+        t1 = price * (1 + StrategyConfig.DIV_TGT1_PCT)
+        t2 = price * (1 + StrategyConfig.DIV_TGT2_PCT)
         win_rate = 0.5 + (yield_pct / 25)
         avg_win = t1 - price
         avg_loss = price - stop
         shares = position_size(balance, price, stop, win_rate, avg_win, avg_loss, max_risk)
-        if shares <= 0: return None
+        if shares <= 0:
+            return None
 
         gross_ret = (yield_pct + avg_win / price * 0.5) * win_rate
         net_ret = tax.net_profit(gross_ret, is_dividend=True)
         composite = net_ret * conf * (1 - tax.policy_risk)
-        return TradeSignal(
-            symbol=sym, strategy="dividend", action="BUY", entry_price=price,
-            stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=conf,
-            expected_return=gross_ret, composite_score=composite
-        )
+        try:
+            return TradeSignal(
+                symbol=sym, strategy="dividend", action="BUY", entry_price=price,
+                stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=conf,
+                expected_return=gross_ret, composite_score=composite,
+            )
+        except ValueError as e:
+            logger.warning("Invalid dividend signal", symbol=sym, error=str(e))
+            return None
 
     @staticmethod
     def swing_signal(
         sym: str, price: float, ind: dict[str, float], tax: TaxPolicy, balance: float, max_risk: float
     ) -> TradeSignal | None:
-        rsi_val = ind.get("rsi", 50)
-        stoch_val = ind.get("stoch_k", 50)
-        if rsi_val < 40 and stoch_val < 20:
+        if ind.get("rsi", 50) < StrategyConfig.SWING_RSI_THRESH and ind.get("stoch_k", 50) < StrategyConfig.SWING_STOCH_THRESH:
             atr_val = ind.get("atr", price * 0.02)
-            stop = price - atr_val * 2
+            stop = price - atr_val * StrategyConfig.STOP_ATR_MULT
             t1 = price + atr_val * 3
             t2 = price + atr_val * 5
-            conf = 0.6
-            win_rate = 0.55
-            avg_win = t1 - price
-            avg_loss = price - stop
-            shares = position_size(balance, price, stop, win_rate, avg_win, avg_loss, max_risk)
-            if shares <= 0: return None
-            gross_ret = avg_win / price * win_rate
+            shares = position_size(balance, price, stop, 0.55, t1 - price, price - stop, max_risk)
+            if shares <= 0:
+                return None
+            gross_ret = (t1 - price) / price * 0.55
             net_ret = tax.net_profit(gross_ret)
-            composite = net_ret * conf * (1 - tax.policy_risk)
-            return TradeSignal(
-                symbol=sym, strategy="swing", action="BUY", entry_price=price,
-                stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=conf,
-                expected_return=gross_ret, composite_score=composite
-            )
+            composite = net_ret * 0.6 * (1 - tax.policy_risk)
+            try:
+                return TradeSignal(
+                    symbol=sym, strategy="swing", action="BUY", entry_price=price,
+                    stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=0.6,
+                    expected_return=gross_ret, composite_score=composite,
+                )
+            except ValueError as e:
+                logger.warning("Invalid swing signal", symbol=sym, error=str(e))
+                return None
         return None
 
     @staticmethod
     def momentum_signal(
         sym: str, price: float, ind: dict[str, float], tax: TaxPolicy, balance: float, max_risk: float
     ) -> TradeSignal | None:
-        adx_val = ind.get("adx", 0)
-        sma50 = ind.get("sma_50", 0)
-        if adx_val > 25 and price > sma50:
+        if ind.get("adx", 0) > StrategyConfig.MOMENTUM_ADX_THRESH and price > ind.get("sma_50", 0):
             atr_val = ind.get("atr", price * 0.02)
-            stop = price - atr_val * 2
+            stop = price - atr_val * StrategyConfig.STOP_ATR_MULT
             t1 = price + atr_val * 4
             t2 = price + atr_val * 6
-            conf = 0.65
-            win_rate = 0.6
-            avg_win = t1 - price
-            avg_loss = price - stop
-            shares = position_size(balance, price, stop, win_rate, avg_win, avg_loss, max_risk)
-            if shares <= 0: return None
-            gross_ret = avg_win / price * win_rate
+            shares = position_size(balance, price, stop, 0.6, t1 - price, price - stop, max_risk)
+            if shares <= 0:
+                return None
+            gross_ret = (t1 - price) / price * 0.6
             net_ret = tax.net_profit(gross_ret)
-            composite = net_ret * conf * (1 - tax.policy_risk)
-            return TradeSignal(
-                symbol=sym, strategy="momentum", action="BUY", entry_price=price,
-                stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=conf,
-                expected_return=gross_ret, composite_score=composite
-            )
+            composite = net_ret * 0.65 * (1 - tax.policy_risk)
+            try:
+                return TradeSignal(
+                    symbol=sym, strategy="momentum", action="BUY", entry_price=price,
+                    stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=0.65,
+                    expected_return=gross_ret, composite_score=composite,
+                )
+            except ValueError as e:
+                logger.warning("Invalid momentum signal", symbol=sym, error=str(e))
+                return None
         return None
 
     @staticmethod
     def mean_reversion_signal(
         sym: str, price: float, ind: dict[str, float], tax: TaxPolicy, balance: float, max_risk: float
     ) -> TradeSignal | None:
-        if ind.get("rsi", 50) < 30:
+        if ind.get("rsi", 50) < StrategyConfig.REVERSION_RSI_THRESH:
             atr_val = ind.get("atr", price * 0.02)
             stop = price - atr_val * 1.5
             t1 = price + atr_val * 2
             t2 = price + atr_val * 3
-            conf = 0.7
-            win_rate = 0.6
-            avg_win = t1 - price
-            avg_loss = price - stop
-            shares = position_size(balance, price, stop, win_rate, avg_win, avg_loss, max_risk)
-            if shares <= 0: return None
-            gross_ret = avg_win / price * win_rate
+            shares = position_size(balance, price, stop, 0.6, t1 - price, price - stop, max_risk)
+            if shares <= 0:
+                return None
+            gross_ret = (t1 - price) / price * 0.6
             net_ret = tax.net_profit(gross_ret)
-            composite = net_ret * conf * (1 - tax.policy_risk)
-            return TradeSignal(
-                symbol=sym, strategy="mean_reversion", action="BUY", entry_price=price,
-                stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=conf,
-                expected_return=gross_ret, composite_score=composite
-            )
+            composite = net_ret * 0.7 * (1 - tax.policy_risk)
+            try:
+                return TradeSignal(
+                    symbol=sym, strategy="mean_reversion", action="BUY", entry_price=price,
+                    stop_loss=stop, target1=t1, target2=t2, shares=shares, confidence=0.7,
+                    expected_return=gross_ret, composite_score=composite,
+                )
+            except ValueError as e:
+                logger.warning("Invalid mean_reversion signal", symbol=sym, error=str(e))
+                return None
         return None
 
 # ============================================================
-# EXECUTION ENGINE (CASH-AWARE, TAX-AWARE)
+# EXECUTION ENGINE
 # ============================================================
 class ExecutionEngine:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.balance = settings.account_balance
+        self.balance: float = settings.account_balance
         self.positions: dict[str, PortfolioPosition] = {}
-        self.commission = 0.001
-        self.slippage = 0.001
+        self.commission: float = 0.001
+        self.slippage: float = 0.001
 
     def buy(self, symbol: str, price: float, qty: int, stop: float, t1: float, t2: float) -> int:
         cost_factor = 1.0 + self.slippage + self.commission
         max_shares = int(self.balance / (price * cost_factor)) if price > 0 else 0
         qty = min(qty, max_shares)
         if qty <= 0:
-            logger.warn("Insufficient balance for buy", symbol=symbol, needed_shares=qty)
+            logger.warn("Insufficient balance", symbol=symbol, needed_shares=qty)
             return 0
         cost = price * qty * cost_factor
         if cost > self.balance:
             logger.warn("Cost exceeds balance", symbol=symbol, cost=cost, balance=self.balance)
             return 0
-
         self.balance -= cost
         self.positions[symbol] = PortfolioPosition(
             symbol=symbol, qty=qty, avg_price=price * (1 + self.slippage),
-            stop=stop, t1=t1, t2=t2, entry_time=datetime.now(),
+            stop=stop, t1=t1, t2=t2,
         )
         logger.info("BUY executed", symbol=symbol, qty=qty, price=price, cash_left=self.balance)
         return qty
@@ -506,7 +567,7 @@ class ExecutionEngine:
     def sell(self, symbol: str, price: float, qty: int | None = None, reason: str = "") -> float | None:
         pos = self.positions.get(symbol)
         if not pos:
-            logger.warn("No position to sell", symbol=symbol)
+            logger.warn("No position", symbol=symbol)
             return None
         qty = min(qty or pos.qty, pos.qty)
         if qty <= 0:
@@ -537,7 +598,7 @@ class ExecutionEngine:
         )
 
 # ============================================================
-# MARKET DATA FETCHER (ASYNC + RESILIENT)
+# MARKET DATA FETCHER (async + resilient)
 # ============================================================
 class MarketDataFetcher:
     def __init__(self, client: httpx.AsyncClient) -> None:
@@ -549,12 +610,14 @@ class MarketDataFetcher:
         for url in RSS_FEEDS:
             try:
                 resp = await self.client.get(url, timeout=5.0)
+                resp.raise_for_status()
                 feed = feedparser.parse(resp.text)
                 for entry in feed.entries[:5]:
                     title = entry.get("title", "")
                     articles.append({"title": title})
-            except httpx.RequestError as e:
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
                 logger.warning("RSS fetch failed", url=url, error=str(e))
+                raise
         return articles
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
@@ -562,17 +625,18 @@ class MarketDataFetcher:
         if not settings.resend_api_key:
             logger.warning("RESEND_API_KEY not set; skipping email")
             return
+        resp = await self.client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+            json={"from": settings.from_email, "to": [settings.to_email], "subject": subject, "html": html},
+            timeout=10.0,
+        )
         try:
-            resp = await self.client.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
-                json={"from": settings.from_email, "to": [settings.to_email], "subject": subject, "html": html},
-                timeout=10.0,
-            )
             resp.raise_for_status()
             logger.info("Email sent successfully")
         except httpx.HTTPStatusError as e:
             logger.error("Email API error", status=e.response.status_code, detail=e.response.text)
+            raise
 
 # ============================================================
 # REGIME DETECTION
@@ -580,57 +644,55 @@ class MarketDataFetcher:
 def detect_regime(ind: dict[str, float], price: float) -> str:
     adx_val = ind.get("adx", 0)
     sma50 = ind.get("sma_50", 0)
-    if adx_val > 25:
-        if price > sma50 * 1.02:
+    if adx_val > StrategyConfig.REGIME_ADX_THRESH:
+        if price > sma50 * StrategyConfig.REGIME_BULL_BUFFER:
             return "bullish"
-        if price < sma50 * 0.98:
+        if price < sma50 * StrategyConfig.REGIME_BEAR_BUFFER:
             return "bearish"
     return "neutral"
 
 # ============================================================
-# DIVIDEND CALENDAR (SYNC, CACHED)
+# DIVIDEND CALENDAR (TTLCache)
 # ============================================================
+_dividend_cache = TTLCache(maxsize=1, ttl=3600)
+
 class DividendCalendar:
-    _cache: dict[str, Any] = {"ts": datetime.min, "data": None}
-
     @staticmethod
-    def get_upcoming(cache_ttl: int = 3600) -> list[DividendInfo]:
-        now = datetime.now()
-        if DividendCalendar._cache["data"] is not None and (now - DividendCalendar._cache["ts"]).total_seconds() < cache_ttl:
-            return DividendCalendar._cache["data"]
-
+    def get_upcoming() -> list[DividendInfo]:
+        if "upcoming" in _dividend_cache:
+            return _dividend_cache["upcoming"]
         today = date.today()
         upcoming: list[DividendInfo] = []
         for div in EX_DATES_RAW:
-            ex = datetime.strptime(div["ex_date"], "%Y-%m-%d").date()
-            days = (ex - today).days
+            ex_dt = datetime.strptime(div["ex_date"], "%Y-%m-%d").date()
+            days = (ex_dt - today).days
             if 0 <= days <= 60:
                 upcoming.append(DividendInfo(**div, days_until=days))
         upcoming.sort(key=lambda d: d.days_until)
-        DividendCalendar._cache["ts"] = now
-        DividendCalendar._cache["data"] = upcoming
+        _dividend_cache["upcoming"] = upcoming
         return upcoming
 
 # ============================================================
-# REPORTER
+# REPORTER (with HTML escape)
 # ============================================================
 class Reporter:
     @staticmethod
     def generate_html(
         engine: ExecutionEngine,
-        executed: list[Tuple[TradeSignal, int]],
+        executed: list[tuple[TradeSignal, int]],
         prices: dict[str, float],
         tax: TaxPolicy,
         dividends: list[DividendInfo],
     ) -> str:
         div_rows = "".join(
-            f"<tr><td>{d.symbol}</td><td>{d.ex_date}</td><td>{d.amount}</td><td>{d.days_until}d</td></tr>"
+            f"<tr><td>{html_escape(d.symbol)}</td><td>{d.ex_date}</td>"
+            f"<td>{d.amount}</td><td>{d.days_until}d</td></tr>"
             for d in dividends[:10]
         )
         sig_rows = "".join(
-            f"<tr><td>{s.symbol}</td><td>{s.strategy}</td><td>{s.entry_price:.2f}</td>"
-            f"<td>{s.stop_loss:.2f}</td><td>{s.target1:.2f}</td><td>{shares}</td>"
-            f"<td>{s.confidence:.0%}</td><td style='color:green'>BUY</td></tr>"
+            f"<tr><td>{html_escape(s.symbol)}</td><td>{html_escape(s.strategy)}</td>"
+            f"<td>{s.entry_price:.2f}</td><td>{s.stop_loss:.2f}</td><td>{s.target1:.2f}</td>"
+            f"<td>{shares}</td><td>{s.confidence:.0%}</td><td style='color:green'>BUY</td></tr>"
             for s, shares in executed
         )
         total_val = engine.total_value(prices)
@@ -640,7 +702,7 @@ class Reporter:
             h2 {{ color: #0066cc; }} table {{ border-collapse: collapse; width: 100%; background: #fff; }}
             th {{ background: #eef3f9; padding: 10px; text-align: left; }} td {{ padding: 8px; border-bottom: 1px solid #eee; }}
         </style></head><body>
-            <div class="header"><h1>PSX Galaxy Supreme v34.0</h1>
+            <div class="header"><h1>PSX Apex Galaxy Supreme v36.0</h1>
                 <p>Balance: PKR {engine.balance:,.0f} | Total: PKR {total_val:,.0f} | Policy Risk: {tax.policy_risk:.0%}</p>
             </div>
             <h2>Upcoming Dividends</h2><table><tr><th>Symbol</th><th>Ex-Date</th><th>Amount</th><th>Days</th></tr>{div_rows}</table>
@@ -649,17 +711,39 @@ class Reporter:
         </body></html>"""
 
 # ============================================================
+# SELF TESTS
+# ============================================================
+def run_self_tests() -> None:
+    """Validate critical components."""
+    logger.info("Running internal self-tests...")
+    s = Settings(account_balance=50000.0, tax_filer=True)
+    assert s.cgt_rate == 0.15
+    assert s.account_balance == 50000.0
+    tax = TaxPolicy(s)
+    assert tax.net_profit(100.0) == 85.0
+    r1 = FundamentalAnalyzer.fetch_company_reports("FFC")
+    r2 = FundamentalAnalyzer.fetch_company_reports("FFC")
+    assert r1["eps"] == r2["eps"]
+    assert IndicatorEngine.calculate(None) == {}
+    assert IndicatorEngine.calculate(pd.DataFrame()) == {}
+    logger.info("✅ All self-tests passed.")
+
+# ============================================================
 # MAIN ORCHESTRATOR
 # ============================================================
 async def main() -> None:
     setup_logging()
-    settings = Settings()
-    
     parser = argparse.ArgumentParser(description="PSX Ultimate Trading Engine")
     parser.add_argument("--confirm", action="store_true", help="Prompt for trade confirmation")
+    parser.add_argument("--test", action="store_true", help="Run internal self-tests")
     args = parser.parse_args()
 
-    logger.info("PSX GALAXY SUPREME v34.0 STARTED", balance=settings.account_balance)
+    if args.test:
+        run_self_tests()
+        return
+
+    settings = Settings()
+    logger.info("PSX APEX GALAXY SUPREME v36.0 STARTED", balance=settings.account_balance)
 
     tax = TaxPolicy(settings)
     engine = ExecutionEngine(settings)
@@ -672,21 +756,26 @@ async def main() -> None:
         articles = await fetcher.fetch_rss_sentiment()
         tax.update_policy_from_news(articles)
 
-        # Historical data (sync, using pypsx if available, else simulated)
         historical: dict[str, pd.DataFrame] = {}
         if PYPSX_AVAILABLE:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            start = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-            end = datetime.now().strftime("%Y-%m-%d")
+            loop = asyncio.get_running_loop()
+            start = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d")
+            end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             syms = [s.symbol for s in TOP_50_SHARIAH_STOCKS[:10]]
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                futures = {ex.submit(pypsx.PSXTicker(s).get_historical, start, end): s for s in syms}
-                for future in as_completed(futures):
-                    s = futures[future]
-                    with suppress(Exception):
-                        df = future.result()
-                        if df is not None and not df.empty:
-                            historical[s] = df
+
+            def fetch_sym_data(sym: str) -> tuple[str, pd.DataFrame | None]:
+                try:
+                    df = pypsx.PSXTicker(sym).get_historical(start, end)
+                    return sym, df
+                except Exception as e:
+                    logger.warning("pypsx fetch failed", symbol=sym, error=str(e))
+                    return sym, None
+
+            tasks = [loop.run_in_executor(None, fetch_sym_data, sym) for sym in syms]
+            results = await asyncio.gather(*tasks)
+            for sym, df in results:
+                if df is not None and not df.empty:
+                    historical[sym] = df
 
         reports = {s.symbol: FundamentalAnalyzer.fetch_company_reports(s.symbol) for s in TOP_50_SHARIAH_STOCKS}
         fund_scores = {sym: FundamentalAnalyzer.score(reports, sym) for sym in reports}
@@ -705,45 +794,29 @@ async def main() -> None:
                 ind = {"rsi": 45, "adx": 20, "stoch_k": 40, "atr": price * 0.02, "sma_50": price, "vol_ratio": 1.0, "close": price}
             ind_cache[sym] = ind
             fscore = fund_scores.get(sym, 0.5)
-            regime = detect_regime(ind, price)
 
-            # Dividend signal
             if sym in div_dict:
                 sig = StrategyEngine.dividend_signal(sym, price, div_dict[sym], ind, tax, settings.account_balance, settings.max_risk_per_trade)
-                if sig:
-                    all_signals.append(sig)
+                if sig: all_signals.append(sig)
 
-            # Swing
             sig = StrategyEngine.swing_signal(sym, price, ind, tax, settings.account_balance, settings.max_risk_per_trade)
-            if sig:
-                all_signals.append(sig)
+            if sig: all_signals.append(sig)
 
-            # Momentum
             sig = StrategyEngine.momentum_signal(sym, price, ind, tax, settings.account_balance, settings.max_risk_per_trade)
-            if sig:
-                all_signals.append(sig)
+            if sig: all_signals.append(sig)
 
-            # Mean reversion
             sig = StrategyEngine.mean_reversion_signal(sym, price, ind, tax, settings.account_balance, settings.max_risk_per_trade)
-            if sig:
-                all_signals.append(sig)
+            if sig: all_signals.append(sig)
 
-        # Pairs trading (if historical data available)
         if len(historical) >= 2:
             closes = pd.DataFrame({s: df["Close"] if "Close" in df else df.iloc[:, 3] for s, df in historical.items()}).dropna(axis=1)
             if closes.shape[1] >= 2:
-                corr_mat = closes.corr()
-                syms = closes.columns.tolist()
-                best_pair = None
-                best_corr = 0.0
-                for i in range(len(syms)):
-                    for j in range(i + 1, len(syms)):
-                        c = corr_mat.iloc[i, j]
-                        if abs(c) > abs(best_corr):
-                            best_corr = c
-                            best_pair = (syms[i], syms[j])
-                if best_pair and abs(best_corr) > 0.8:
-                    sym_a, sym_b = best_pair
+                corr_mat = closes.corr().abs()
+                np.fill_diagonal(corr_mat.values, 0)
+                max_corr_idx = np.unravel_index(corr_mat.values.argmax(), corr_mat.shape)
+                best_corr = corr_mat.iloc[max_corr_idx]
+                if pd.notna(best_corr) and best_corr > 0.8:
+                    sym_a, sym_b = corr_mat.index[max_corr_idx[0]], corr_mat.columns[max_corr_idx[1]]
                     price_a = prices.get(sym_a, 0)
                     price_b = prices.get(sym_b, 0)
                     if price_a > 0 and price_b > 0:
@@ -751,7 +824,7 @@ async def main() -> None:
                         ind_buy = ind_cache.get(buy_sym) or IndicatorEngine.calculate(historical.get(buy_sym))
                         sig = StrategyEngine.momentum_signal(buy_sym, prices[buy_sym], ind_buy, tax, settings.account_balance, settings.max_risk_per_trade)
                         if sig:
-                            sig.strategy = "pairs"
+                            sig = sig.model_copy(update={"strategy": "pairs"})
                             all_signals.append(sig)
 
         all_signals.sort(key=lambda s: s.composite_score, reverse=True)
@@ -764,7 +837,7 @@ async def main() -> None:
                 logger.info("Trades aborted by user")
                 return
 
-        executed: list[Tuple[TradeSignal, int]] = []
+        executed: list[tuple[TradeSignal, int]] = []
         for sig in selected:
             bought = engine.buy(sig.symbol, sig.entry_price, sig.shares, sig.stop_loss, sig.target1, sig.target2)
             if bought > 0:
@@ -772,12 +845,14 @@ async def main() -> None:
                 executed.append((sig, bought))
 
         engine.update_stops(prices)
-
         html = Reporter.generate_html(engine, executed, prices, tax, dividends)
-        await fetcher.send_email(settings, f"PSX Galaxy Report {datetime.now(timezone.utc):%Y-%m-%d %H:%M}", html)
+        await fetcher.send_email(settings, f"PSX Apex Report {datetime.now(timezone.utc):%Y-%m-%d %H:%M}", html)
 
     logger.info("Pipeline completed. Report sent.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Process interrupted by user. Shutting down gracefully.")
 ```
