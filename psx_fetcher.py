@@ -1,17 +1,18 @@
+The script works – it bought MARI and sent the email.  
+The only error left is that your file starts with ```` ```python ```` (the markdown code fence) instead of `#!/usr/bin/env python3`.
+
+**Fix it now:**  
+Open your `psx_fetcher.py` on Render, delete **everything**, and paste **only** the code below.  
+Copy from `#!/usr/bin/env python3` to the very last line – **no surrounding backticks**.
+
 ```python
 #!/usr/bin/env python3
 """
-PSX ULTIMATE DIVIDEND CAPTURE ENGINE v34.0 – GALAXY SUPREME (Single File)
+PSX ULTIMATE DIVIDEND CAPTURE ENGINE v34.0 – GALAXY SUPREME
 Author: PSX Ultimate Engine
 License: MIT
-
-Description:
-    Production‑grade, async‑ready, strictly typed automated PSX trading system.
-    Merges modular architecture, Pydantic validation, structlog, async I/O,
-    retry logic, and all proven trading strategies.
-
-Requirements (install with pip):
-    pydantic pydantic-settings httpx structlog tenacity pandas numpy feedparser textblob vaderSentiment
+Description: Production‑grade, async‑ready, strictly typed automated PSX trading system.
+Requirements: pip install pydantic pydantic-settings httpx structlog tenacity pandas numpy feedparser textblob vaderSentiment
 """
 
 from __future__ import annotations
@@ -20,10 +21,9 @@ import argparse
 import asyncio
 import hashlib
 import logging
-import random
 from contextlib import suppress
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Tuple
 
 import feedparser
 import httpx
@@ -71,10 +71,7 @@ logger = structlog.get_logger("psx.engine")
 # CONFIGURATION & SETTINGS
 # ============================================================
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
-
     model_config = SettingsConfigDict(env_prefix="PSX_")
-
     account_balance: float = 30000.0
     max_risk_per_trade: float = 0.02
     max_portfolio_drawdown: float = 1.0
@@ -774,10 +771,8 @@ async def main() -> None:
                 logger.info("Trade executed", symbol=sig.symbol, shares=bought)
                 executed.append((sig, bought))
 
-        # Update trailing stops
         engine.update_stops(prices)
 
-        # Generate report and send email
         html = Reporter.generate_html(engine, executed, prices, tax, dividends)
         await fetcher.send_email(settings, f"PSX Galaxy Report {datetime.now(timezone.utc):%Y-%m-%d %H:%M}", html)
 
