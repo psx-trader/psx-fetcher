@@ -1,12 +1,7 @@
-Your `psx_fetcher.py` file starts with the Markdown code‑fence  
+Your `psx_fetcher.py` still contains a Markdown code fence on line 1.  
+Delete everything **before** the `#!/usr/bin/env python3` and everything **after** the final `if __name__ == "__main__":` block.  
 
-```python
-```
-
-This is not valid Python – hence the `SyntaxError`.  
-Remove that first line (and the trailing ` ``` `) so the file begins directly with `#!/usr/bin/env python3` or the first import.
-
-Below is the corrected, ready‑to‑run copy of the Titan v106.0 script.  Save it as `psx_fetcher.py` and the cron job will work.
+Paste the entire content below into a new, clean `psx_fetcher.py` file – no extra text, no backticks, no non‑ASCII characters.
 
 ```python
 #!/usr/bin/env python3
@@ -72,7 +67,9 @@ except ImportError: HAS_TELEGRAM = False
 try: from fastapi.staticfiles import StaticFiles; HAS_STATIC = True
 except ImportError: HAS_STATIC = False
 
-# ─── Configuration ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Configuration (environment‑driven)
+# ---------------------------------------------------------------------------
 class Settings:
     DB_PATH = os.getenv("TITAN_DB", "titan.db")
     PSX_URL = os.getenv("PSX_URL", "https://dps.psx.com.pk/api/v2/market-summary")
@@ -104,11 +101,15 @@ class Settings:
 
 CFG = Settings()
 
-# ─── Logging ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("titan")
 
-# ─── Universal Stub Factory (satirical features) ────────────────────────────
+# ---------------------------------------------------------------------------
+# Universal Stub Factory (satirical features)
+# ---------------------------------------------------------------------------
 class _UniversalStub:
     def __getattr__(self, name):
         def noop(*args, **kwargs):
@@ -116,7 +117,9 @@ class _UniversalStub:
         return noop
 stub = _UniversalStub()
 
-# ─── Database ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
 class Database:
     def __init__(self, path: str):
         self.conn = sqlite3.connect(path, check_same_thread=False)
@@ -235,7 +238,9 @@ class Database:
     def fetch_equity_curve(self) -> pd.DataFrame:
         return pd.read_sql_query("SELECT ts, cash, portfolio_value FROM equity ORDER BY ts", self.conn)
 
-# ─── Historical Data Seeder (10 years) ──────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Historical Data Seeder (10 years)
+# ---------------------------------------------------------------------------
 class HistoricalDataSeeder:
     def __init__(self, db: Database, symbols: List[str], years: int = 10):
         self.db = db
@@ -288,7 +293,9 @@ class HistoricalDataSeeder:
             self.db.insert_historical(symbol, date_str, float(row['Open']), float(row['High']),
                                       float(row['Low']), float(row['Close']), float(row['Volume']))
 
-# ─── Financial Statement Provider (synthetic) ──────────────────────────────
+# ---------------------------------------------------------------------------
+# Financial Statement Provider (synthetic)
+# ---------------------------------------------------------------------------
 class FinancialStatementProvider:
     def __init__(self, db: Database):
         self.db = db
@@ -318,7 +325,9 @@ class FinancialStatementProvider:
                              (symbol, date.today().isoformat(), rev, ni, ta, tl, ca, cl, ocf, capex, "synthetic"))
         self.db.conn.commit()
 
-# ─── Mailer (non‑blocking) ──────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Mailer (non‑blocking)
+# ---------------------------------------------------------------------------
 class Mailer:
     def __init__(self):
         self.host = CFG.SMTP_HOST; self.port = CFG.SMTP_PORT
@@ -339,7 +348,9 @@ class Mailer:
     def sell_alert(self, symbol, price, reason):
         self.send(CFG.SELL_EMAIL, f"SELL {symbol} @ {price:.2f}", f"<h2>SELL {symbol}</h2><p>{price:.2f}</p><p>{reason}</p>")
 
-# ─── PSX Live Data ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# PSX Live Data
+# ---------------------------------------------------------------------------
 class PSXClient:
     def __init__(self):
         self.client = httpx.AsyncClient(headers={"User-Agent":"Titan/106"}, timeout=10)
@@ -358,7 +369,9 @@ class PSXClient:
             log.warning(f"PSX fetch error: {e}")
             return {}
 
-# ─── Indicators (from historical DataFrame) ────────────────────────────────
+# ---------------------------------------------------------------------------
+# Indicators (from historical DataFrame)
+# ---------------------------------------------------------------------------
 def compute_indicators_from_df(df: pd.DataFrame) -> dict:
     if df.empty or len(df) < 50: return {}
     close = df['close'] if 'close' in df.columns else df['Close']
@@ -393,7 +406,9 @@ def compute_indicators_from_df(df: pd.DataFrame) -> dict:
         'vol_ratio': float(vol_ratio), 'volatility': float(volatility)
     }
 
-# ─── Strategy Engine ────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Strategy Engine
+# ---------------------------------------------------------------------------
 class StrategyEngine:
     @staticmethod
     def generate_signals(symbol, price, indicators, cash, max_risk):
@@ -419,7 +434,9 @@ class StrategyEngine:
                                 'qty': qty, 'confidence': 0.55, 'strategy': 'breakout'})
         return signals
 
-# ─── Portfolio Manager ──────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Portfolio Manager
+# ---------------------------------------------------------------------------
 class Portfolio:
     def __init__(self, cash):
         self.cash = cash; self.holdings: Dict[str, dict] = {}; self.initial = cash
@@ -448,7 +465,9 @@ class Portfolio:
             value += h['qty'] * prices.get(sym, h['avg_price'])
         return value
 
-# ─── ML Model (online ensemble) ─────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# ML Model (online ensemble)
+# ---------------------------------------------------------------------------
 class MLModel:
     def __init__(self):
         self.models = []
@@ -470,7 +489,9 @@ class MLModel:
     def add_data(self, features, outcome):
         self.X.append(features); self.y.append(outcome)
 
-# ─── Alert Bots ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Alert Bots
+# ---------------------------------------------------------------------------
 class AlertBots:
     def __init__(self):
         self.discord = None
@@ -487,7 +508,9 @@ class AlertBots:
     async def send_alert(self, message):
         if self.tg_app: await self.tg_app.bot.send_message(chat_id=CFG.TELEGRAM_CHAT_ID, text=message)
 
-# ─── Global Data Aggregator (stubs) ────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Global Data Aggregator (stubs)
+# ---------------------------------------------------------------------------
 class GlobalDataAggregator:
     async def fetch_all(self):
         stub.imf_data.fetch("PK")
@@ -503,7 +526,9 @@ class GlobalDataAggregator:
         stub.asic_filings.latest()
         return {"gdp_growth": 3.5, "inflation": 12.0, "global_risk": 0.6}
 
-# ─── Global Forensic Auditor ────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Global Forensic Auditor
+# ---------------------------------------------------------------------------
 class GlobalForensicAuditor:
     def __init__(self, db):
         self.db = db
@@ -513,7 +538,9 @@ class GlobalForensicAuditor:
         stub.whistleblower_aggregator.check(symbol)
         self.db.log_audit_finding(symbol, "global_audit", "low", "No anomalies found", "", 0, 0)
 
-# ─── Global Tax Engine ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Global Tax Engine
+# ---------------------------------------------------------------------------
 class GlobalTaxEngine:
     def compute_total_charges(self, symbol, trade_value, is_buy, holding_days=None):
         charges = trade_value * (CFG.BROKERAGE_RATE + CFG.CVT_RATE + CFG.SECP_FEE)
@@ -529,7 +556,9 @@ class GlobalTaxEngine:
         stub.international_tax.apply_ftt(symbol, trade_value)
         return charges
 
-# ─── Dashboard (FastAPI) ────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Dashboard (FastAPI)
+# ---------------------------------------------------------------------------
 def create_dashboard(engine):
     app = FastAPI()
     if HAS_STATIC: app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -563,7 +592,9 @@ def create_dashboard(engine):
         return {"error":"invalid"}
     return app
 
-# ─── Main Engine ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Main Engine
+# ---------------------------------------------------------------------------
 class TitanEngine:
     def __init__(self):
         self.db = Database(CFG.DB_PATH)
@@ -674,7 +705,9 @@ class TitanEngine:
                     except: self.websockets.remove(ws)
             await asyncio.sleep(1)
 
-# ─── Entry Point ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Entry Point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     engine = TitanEngine()
     try:
