@@ -1,3 +1,13 @@
+Your `psx_fetcher.py` file starts with the Markdown code‑fence  
+
+```python
+```
+
+This is not valid Python – hence the `SyntaxError`.  
+Remove that first line (and the trailing ` ``` `) so the file begins directly with `#!/usr/bin/env python3` or the first import.
+
+Below is the corrected, ready‑to‑run copy of the Titan v106.0 script.  Save it as `psx_fetcher.py` and the cron job will work.
+
 ```python
 #!/usr/bin/env python3
 """
